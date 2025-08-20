@@ -1001,11 +1001,12 @@ impl DefaultPipeline {
         logits: &Tensor,
         groups: &VecDeque<Arc<SequenceGroup>>,
     ) -> Result<Vec<TokenOrFinishReason>> {
-        let (tokens_generated, custom_stop_tokens, panalties, reference_tokens): (
+        let (tokens_generated, custom_stop_tokens, panalties, reference_tokens, seeds): (
             Vec<i32>,
             Vec<Vec<String>>,
             Vec<f32>,
             Vec<Vec<u32>>,
+            Vec<u64>,
         ) = groups
             .into_par_iter()
             .map(|group| {
@@ -1037,6 +1038,10 @@ impl DefaultPipeline {
                 } else {
                     vec![]
                 };
+                
+                // Each request gets its own seed (vLLM V1 compatibility)
+                let seed = sampling_params.seed.unwrap_or(DEFAULT_SAMPLING_SEED);
+                
                 (
                     if generated > sampling_params.max_tokens {
                         -1i32
@@ -1046,17 +1051,19 @@ impl DefaultPipeline {
                     custom_stop_token,
                     sampling_params.repetition_penalty.unwrap_or(1.0),
                     ref_tokens,
+                    seed,
                 )
             })
-            .collect::<Vec<(i32, Vec<String>, f32, Vec<u32>)>>()
+            .collect::<Vec<(i32, Vec<String>, f32, Vec<u32>, u64)>>()
             .into_iter()
             .fold(
-                (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
-                |mut acc, (gen, stop, penalty, ref_t)| {
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+                |mut acc, (gen, stop, penalty, ref_t, seed)| {
                     acc.0.push(gen);
                     acc.1.push(stop);
                     acc.2.push(penalty);
                     acc.3.push(ref_t);
+                    acc.4.push(seed);
                     acc
                 },
             );
@@ -1070,12 +1077,8 @@ impl DefaultPipeline {
                 None
             };
 
-        // Set the seed for reproducible sampling
-        // Use the provided seed or fallback to default for reproducibility
-        let seed = param.seed.unwrap_or(DEFAULT_SAMPLING_SEED);
-        self.logits_processor.set_seed(seed);
-
         // vLLM V1: Pass raw logits for logprobs computation, penalties for sampling
+        // Each request uses its own seed for independent sampling
         let sampling_results = self
             .logits_processor
             .sample_with_logprobs_and_penalties(
@@ -1083,7 +1086,8 @@ impl DefaultPipeline {
                 &sampling_params, 
                 panalties,
                 reference_tokens,
-                Some(&self.tokenizer)
+                Some(&self.tokenizer),
+                seeds,  // Per-request seeds
             )
             .unwrap();
         let result: Vec<TokenOrFinishReason> = sampling_results

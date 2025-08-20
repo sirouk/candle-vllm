@@ -93,6 +93,8 @@ pub struct SamplingParams {
     /// Thinking flag for reasoning models
     //  default = False
     pub thinking: Option<bool>,
+    /// Random seed for reproducible sampling
+    pub seed: Option<u64>,
 }
 
 impl SamplingParams {
@@ -118,6 +120,7 @@ impl SamplingParams {
         prompt_logprobs: Option<usize>,
         skip_special_tokens: bool,
         thinking: Option<bool>,
+        seed: Option<u64>,
     ) -> Result<Self, APIError> {
         let this = Self {
             n,
@@ -140,6 +143,7 @@ impl SamplingParams {
             prompt_logprobs,
             skip_special_tokens,
             thinking,
+            seed,
         };
 
         this.verify_args()?;

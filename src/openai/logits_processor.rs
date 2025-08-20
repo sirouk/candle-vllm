@@ -50,6 +50,13 @@ impl LogitsProcessor {
         let strategy = LogitsProcessor::get_strategy(temperature, top_k, top_p);
         Self::from_sampling(seed, strategy)
     }
+    
+    /// Update the RNG seed for reproducible sampling
+    pub fn set_seed(&self, seed: u64) {
+        let new_rng = rand::rngs::StdRng::seed_from_u64(seed);
+        let mut rng = self.rng.lock().unwrap();
+        *rng = new_rng;
+    }
 
     pub fn get_strategy(
         temperature: Option<f32>,

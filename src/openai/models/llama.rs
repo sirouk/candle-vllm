@@ -364,13 +364,19 @@ impl Llama {
         progress_reporter: Arc<RwLock<ProgressReporter>>,
     ) -> Result<Self> {
         let wte = embedding(cfg.vocab_size, cfg.hidden_size, vb.pp("model.embed_tokens"))?;
-        let lm_head = ReplicatedLinear::load_no_bias(
-            cfg.hidden_size,
-            cfg.vocab_size,
-            vb.pp("lm_head"),
-            &None,
-            &None,
-        )?;
+        let lm_head = if cfg.tie_word_embeddings {
+            // When tie_word_embeddings is true, reuse the embedding weights
+            ReplicatedLinear::from_weight_bias(wte.embeddings().clone(), None)?
+        } else {
+            // When tie_word_embeddings is false, load separate lm_head weights
+            ReplicatedLinear::load_no_bias(
+                cfg.hidden_size,
+                cfg.vocab_size,
+                vb.pp("lm_head"),
+                &None,
+                &None,
+            )?
+        };
 
         let rotary_emb = Arc::new(Llama3RotaryEmbedding::new(dtype, cfg, device, true)?);
         let ln_f = rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("model.norm"))?;

@@ -53,4 +53,6 @@ pub struct ChatCompletionRequest {
     pub logprobs: Option<bool>, //false
     pub repetition_penalty: Option<f32>, //1.1
     pub thinking: Option<bool>,       //false
+    #[serde(default)]
+    pub seed: Option<u64>, //random seed for reproducible sampling
 }

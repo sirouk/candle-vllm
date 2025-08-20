@@ -200,6 +200,7 @@ pub async fn chat_completions(
         None,
         request.skip_special_tokens.unwrap_or(true),
         request.thinking,
+        request.seed,
     ) {
         Ok(params) => params,
         Err(e) => return ChatResponder::ValidationError(e),

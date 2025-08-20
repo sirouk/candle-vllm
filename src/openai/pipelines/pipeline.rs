@@ -41,7 +41,7 @@ use std::{path::PathBuf, sync::Arc};
 use tokenizers::Tokenizer;
 use tracing::{info, warn};
 const EOS_TOKEN: &str = "</s>";
-const SAMPLING_SEED: u64 = 299792458;
+const DEFAULT_SAMPLING_SEED: u64 = 299792458;
 const MIN_GEN_TOKENS: usize = 128;
 const MAX_GEN_TOKENS: usize = 16 * 1024;
 enum LLMModel {
@@ -754,7 +754,7 @@ impl DefaultLoader {
             .map(|(rank, model)| {
                 let logits_processor = {
                     LogitsProcessor::new(
-                        SAMPLING_SEED,
+                        DEFAULT_SAMPLING_SEED,
                         None,
                         None,
                         None,
@@ -1069,6 +1069,11 @@ impl DefaultPipeline {
             } else {
                 None
             };
+
+        // Set the seed for reproducible sampling
+        // Use the provided seed or fallback to default for reproducibility
+        let seed = param.seed.unwrap_or(DEFAULT_SAMPLING_SEED);
+        self.logits_processor.set_seed(seed);
 
         // vLLM V1: Pass raw logits for logprobs computation, penalties for sampling
         let sampling_results = self

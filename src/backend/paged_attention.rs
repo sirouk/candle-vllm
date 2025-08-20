@@ -1,9 +1,12 @@
+#[cfg(any(feature = "cuda", feature = "metal"))]
 use candle::backend::BackendStorage;
 #[cfg(feature = "cuda")]
 use candle::CudaStorage;
 #[cfg(feature = "metal")]
 use candle::MetalStorage;
-use candle::{CpuStorage, DType, Layout, Result, Shape, Storage, Tensor};
+#[cfg(any(feature = "cuda", feature = "metal"))]
+use candle::Storage;
+use candle::{CpuStorage, DType, Layout, Result, Shape, Tensor};
 use candle_core as candle;
 #[allow(dead_code)]
 struct PagedAttention {

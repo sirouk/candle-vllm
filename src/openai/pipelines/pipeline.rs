@@ -4,7 +4,7 @@ use crate::backend::progress::{progress_worker, ProgressReporter};
 use crate::openai::logits_processor::LogitsProcessor;
 use crate::openai::models::TokenID;
 use crate::openai::requests::StopTokens;
-use crate::openai::sampling_params::{GenerationConfig, Logprobs, TopLogprob};
+use crate::openai::sampling_params::{GenerationConfig, Logprobs};
 use crate::openai::{BosEosToken, TokenizerConfig};
 use crate::scheduler::sequence::SequenceGroup;
 use crate::{
@@ -1061,32 +1061,32 @@ impl DefaultPipeline {
                 },
             );
 
-        let logits = if panalties.iter().any(|&v| v != 1.0 && v != 0.) {
-            self.logits_processor
-                .apply_batch_repeat_penalty(logits, panalties, reference_tokens)
-                .unwrap()
-        } else {
-            logits.to_owned()
-        };
-
         let group_ids: Vec<usize> = groups.iter().map(|group| group.group_id).collect();
         let param = &groups[0].sampling_params;
         let sampling_params =
-            if param.temperature.is_some() && (param.top_k.is_some() || param.top_p.is_some()) {
+            if param.temperature.is_some() && (param.top_k.is_some() || param.top_p.is_some()) || param.logprobs.is_some() {
                 Some(param.to_owned())
             } else {
                 None
             };
 
-        let next_tokens = self
+        // vLLM V1: Pass raw logits for logprobs computation, penalties for sampling
+        let sampling_results = self
             .logits_processor
-            .sample(&logits, &sampling_params)
+            .sample_with_logprobs_and_penalties(
+                logits, 
+                &sampling_params, 
+                panalties,
+                reference_tokens,
+                Some(&self.tokenizer)
+            )
             .unwrap();
-        let result: Vec<TokenOrFinishReason> = next_tokens
+        let result: Vec<TokenOrFinishReason> = sampling_results
             .into_par_iter()
             .enumerate()
-            .map(|(i, next_token)| {
+            .map(|(i, sampling_result)| {
                 let group_id = group_ids[i];
+                let next_token = sampling_result.token;
                 let mut text = "".to_string();
                 let mut decoder_map = self.stream_decoders.write().unwrap();
                 match decoder_map.get_mut(&group_id) {
@@ -1124,14 +1124,63 @@ impl DefaultPipeline {
                 } else {
                     Left(Logprobs {
                         token: next_token as usize,
-                        logprob: 0.0,
-                        top_logprobs: Vec::<TopLogprob>::new(),
+                        logprob: sampling_result.logprob,
+                        top_logprobs: sampling_result.top_logprobs,
                         bytes: text,
                     })
                 }
             })
             .collect();
         Ok(result)
+    }
+
+    pub fn compute_prompt_logprobs(
+        &self,
+        logits: &Tensor,
+        prompt_token_ids: &[usize],
+        num_logprobs: Option<usize>,
+    ) -> Result<Vec<Logprobs>> {
+        // Compute log_softmax on raw logits (vLLM V1 style - no temperature/penalties)
+        let log_probs = self.logits_processor.compute_log_softmax(&logits)?;
+        let log_probs_vec: Vec<Vec<f32>> = log_probs.to_vec2()?;
+        
+        // For each prompt position, get the logprob of the actual next token
+        let mut prompt_logprobs = Vec::new();
+        
+        // Skip the first token (no previous context to predict from)
+        for i in 0..prompt_token_ids.len() - 1 {
+            let next_token_id = prompt_token_ids[i + 1];
+            let token_logprob = log_probs_vec[i][next_token_id];
+            
+            // Get top logprobs if requested
+            let top_logprobs = if let Some(n) = num_logprobs {
+                if n > 0 {
+                    self.logits_processor
+                        .extract_top_logprobs(&log_probs.narrow(0, i, 1)?, n, Some(&self.tokenizer))?
+                        .into_iter()
+                        .next()
+                        .unwrap_or_default()
+                } else {
+                    vec![]
+                }
+            } else {
+                vec![]
+            };
+            
+            // Get the text for this token
+            let bytes = self.tokenizer
+                .id_to_token(next_token_id as u32)
+                .unwrap_or_else(|| format!("<{}>", next_token_id));
+            
+            prompt_logprobs.push(Logprobs {
+                token: next_token_id,
+                logprob: token_logprob,
+                bytes,
+                top_logprobs,
+            });
+        }
+        
+        Ok(prompt_logprobs)
     }
 
     pub fn name(&self) -> &str {

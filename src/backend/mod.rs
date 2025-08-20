@@ -31,7 +31,7 @@ pub fn get_or_load_func(
         .map_err(APIError::from)
 }
 
-#[allow(unused_imports)]
+#[cfg(feature = "cuda")]
 use crate::openai::responses::APIError;
 pub use cache::*;
 #[cfg(feature = "cuda")]

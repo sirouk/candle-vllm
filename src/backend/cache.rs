@@ -11,7 +11,9 @@ use candle_core::{
 };
 #[cfg(feature = "cuda")]
 use kernels::ffi::{copy_blocks_bf16, copy_blocks_f16, copy_blocks_f32};
-use std::{collections::HashMap, iter::zip};
+use std::collections::HashMap;
+#[cfg(any(feature = "cuda", feature = "metal"))]
+use std::iter::zip;
 
 /// # Safety
 /// Unsafe due to passing pointers
@@ -487,4 +489,41 @@ pub fn swap_blocks(src: Tensor, dst: &Tensor, block_mapping: HashMap<usize, usiz
     }
 
     Ok(())
+}
+
+// CPU fallback implementations when neither CUDA nor Metal features are enabled
+#[cfg(not(any(feature = "cuda", feature = "metal")))]
+pub fn copy_blocks(
+    key_cache: Vec<&mut candle_core::Tensor>,
+    value_cache: Vec<&mut candle_core::Tensor>,
+    block_mapping: HashMap<usize, Vec<usize>>,
+) -> candle_core::Result<()> {
+    // For CPU, we can implement a simple copy operation
+    // This is a basic implementation - you may need to optimize for production use
+    for (src_block, dst_blocks) in block_mapping.iter() {
+        for dst_block in dst_blocks {
+            for cache in key_cache.iter_mut() {
+                // Simple element-wise copy for CPU tensors
+                let src_start = src_block * cache.dims()[0];
+                let dst_start = dst_block * cache.dims()[0];
+                let block_size = cache.dims()[0];
+                
+                // This is a simplified implementation
+                // In production, you'd want to implement proper tensor slicing and copying
+                candle_core::bail!("CPU copy_blocks not fully implemented - please use CUDA or Metal features");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(any(feature = "cuda", feature = "metal")))]
+pub fn swap_blocks(
+    src: candle_core::Tensor,
+    dst: &mut candle_core::Tensor,
+    block_mapping: HashMap<usize, usize>,
+) -> candle_core::Result<()> {
+    // For CPU, implement a simple swap operation
+    // This is a basic stub - proper implementation would require actual tensor operations
+    candle_core::bail!("CPU swap_blocks not implemented - please use CUDA or Metal features");
 }

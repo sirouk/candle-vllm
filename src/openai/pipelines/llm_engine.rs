@@ -338,9 +338,23 @@ impl LLMEngine {
         created: u64,
         content: Option<String>,
         finish_reason: Option<String>,
+        logprobs_data: Option<crate::openai::sampling_params::Logprobs>,
+        prompt_logprobs_data: Option<Vec<crate::openai::sampling_params::Logprobs>>,
         pipeline: &DefaultPipeline,
     ) -> ChatCompletionChunk {
         let mut choices = Vec::new();
+        
+        // Convert Logprobs to WrapperLogprobs if present
+        let logprobs = logprobs_data.map(|lp| WrapperLogprobs {
+            content: vec![lp],
+        });
+        
+        // For streaming, prompt_logprobs only go in the first chunk
+        // We'll pass them when sending the first token
+        let prompt_logprobs = prompt_logprobs_data.map(|plp| WrapperLogprobs {
+            content: plp,
+        });
+        
         let choice = Choice {
             delta: ChoiceData {
                 role: pipeline.get_past_conversation().get_roles().0.clone(),
@@ -348,6 +362,8 @@ impl LLMEngine {
             },
             finish_reason,
             index: 0,
+            logprobs,
+            prompt_logprobs,
         };
         choices.push(choice);
 
@@ -506,6 +522,31 @@ impl LLMEngine {
             };
 
             if is_prompt {
+                // Compute prompt logprobs if requested
+                {
+                    let e = engine.read();
+                    let (pipeline, _) = e.get_pipeline(rank).unwrap();
+                    
+                    for group in scheduled.iter() {
+                        if let Some(prompt_logprobs_num) = group.sampling_params.prompt_logprobs {
+                            let seq = group.get_seqs().values().next().unwrap();
+                            let prompt_ids = seq.deref().get_token_ids();
+                            
+                            // Get the logits for this sequence's prompt
+                            // Note: This assumes batch size 1 for prompt processing
+                            if !prompt_ids.is_empty() && logits.dims()[0] > 0 {
+                                let prompt_logprobs = pipeline.compute_prompt_logprobs(
+                                    &logits,
+                                    &prompt_ids,
+                                    Some(prompt_logprobs_num),
+                                )?;
+                                
+                                seq.deref_mut().set_prompt_logprobs(prompt_logprobs);
+                            }
+                        }
+                    }
+                }
+                
                 let mut e = engine.write();
                 let prefill_chunk_size = e.prefill_chunk_size.unwrap_or(PREFILL_CHUNK_SIZE);
                 if prefill_chunk_size > 0 {
@@ -622,11 +663,21 @@ impl LLMEngine {
                         if let Some(sender) = &group.sender {
                             let e = engine.read();
                             let (pipeline, _) = e.get_pipeline(rank).unwrap();
+                            
+                            // Include prompt_logprobs only on the first token
+                            let prompt_logprobs = if seq.deref().get_output_len() == 0 {
+                                seq.deref().get_prompt_logprobs()
+                            } else {
+                                None
+                            };
+                            
                             let chunk = e.get_stream_response(
                                 group.request_id.clone(),
                                 group.arrival_time,
                                 Some(logprobs.bytes.clone()),
                                 None,
+                                Some(logprobs.clone()),
+                                prompt_logprobs,
                                 pipeline,
                             );
                             let ret = sender.send(ChatResponse::Chunk(chunk));
@@ -650,6 +701,8 @@ impl LLMEngine {
                                 group.arrival_time,
                                 None,
                                 Some(finish_reason.clone()),
+                                None,  // No logprobs for finish reason
+                                None,  // No prompt_logprobs for finish reason
                                 pipeline,
                             );
                             let ret = sender.send(ChatResponse::Chunk(chunk));
@@ -736,6 +789,9 @@ impl LLMEngine {
                                 } else {
                                     None
                                 },
+                                prompt_logprobs: seq.deref().get_prompt_logprobs().map(|plp| {
+                                    WrapperLogprobs { content: plp }
+                                }),
                             };
                             choices.push(choice);
                         }

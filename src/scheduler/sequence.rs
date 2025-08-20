@@ -21,6 +21,7 @@ pub enum SequenceStatus {
 
 pub struct SequenceData {
     prompt_token_ids: Vec<usize>,
+    prompt_logprobs: Option<Vec<Logprobs>>, // Stores logprobs for prompt tokens
     output_token_ids: Vec<Logprobs>,
     cumulative_logprob: f32,
     status: SequenceStatus,
@@ -31,6 +32,7 @@ impl SequenceData {
     pub fn new(prompt_token_ids: Vec<usize>) -> Self {
         Self {
             prompt_token_ids,
+            prompt_logprobs: None,
             output_token_ids: Vec::new(),
             cumulative_logprob: 0.,
             status: SequenceStatus::Waiting,
@@ -45,6 +47,14 @@ impl SequenceData {
 
     pub fn set_status(&mut self, status: SequenceStatus) {
         self.status = status;
+    }
+    
+    pub fn set_prompt_logprobs(&mut self, prompt_logprobs: Vec<Logprobs>) {
+        self.prompt_logprobs = Some(prompt_logprobs);
+    }
+    
+    pub fn get_prompt_logprobs(&self) -> Option<&Vec<Logprobs>> {
+        self.prompt_logprobs.as_ref()
     }
 
     fn get_cumulative_logprob(&self) -> f32 {
@@ -103,6 +113,10 @@ impl _Sequence {
     pub fn get_prompt_len(&self) -> usize {
         self.deref().prompt_token_ids.len()
     }
+    
+    pub fn get_output_len(&self) -> usize {
+        self.deref().output_token_ids.len()
+    }
 
     pub fn get_len(&self) -> usize {
         let dref = self.deref();
@@ -149,6 +163,14 @@ impl _Sequence {
     pub fn set_finish_reason(&mut self, finish_reason: String) {
         self.deref_mut()
             .set_status(SequenceStatus::Finished(finish_reason.clone()));
+    }
+    
+    pub fn set_prompt_logprobs(&mut self, prompt_logprobs: Vec<Logprobs>) {
+        self.deref_mut().set_prompt_logprobs(prompt_logprobs)
+    }
+    
+    pub fn get_prompt_logprobs(&self) -> Option<Vec<Logprobs>> {
+        self.deref().get_prompt_logprobs().cloned()
     }
 
     pub fn get_finish_reason(&self) -> String {

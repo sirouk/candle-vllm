@@ -78,6 +78,7 @@ pub struct ChatChoice {
     pub finish_reason: Option<String>,
     pub index: usize,
     pub logprobs: Option<WrapperLogprobs>,
+    pub prompt_logprobs: Option<WrapperLogprobs>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,6 +103,8 @@ pub struct Choice {
     pub delta: ChoiceData,
     pub finish_reason: Option<String>,
     pub index: usize,
+    pub logprobs: Option<WrapperLogprobs>,
+    pub prompt_logprobs: Option<WrapperLogprobs>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

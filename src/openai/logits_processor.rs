@@ -1,13 +1,23 @@
 #[cfg(feature = "cuda")]
 use crate::backend::custom_ops::sort::ArgSortOp; //Use our custom sort kernel, fix kernel crash on A100
+use crate::backend::custom_ops::moe::{TopKLastDimOp, TopKOutput};
 use crate::candle::D;
 use crate::candle::{DType, Error, Result, Tensor};
-use crate::openai::sampling_params::SamplingParams;
+use crate::openai::sampling_params::{SamplingParams, TopLogprob};
 use rand::{distr::Distribution, SeedableRng};
 use rayon::iter::IntoParallelIterator;
 use rayon::iter::ParallelIterator;
 use std::sync::Arc;
 use std::sync::Mutex;
+
+/// Result of sampling that includes both the token and its log probability
+#[derive(Clone, Debug)]
+pub struct SamplingResult {
+    pub token: u32,
+    pub logprob: f32,
+    pub top_logprobs: Vec<TopLogprob>,
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub enum Sampling {
     ArgMax,
@@ -165,6 +175,172 @@ impl LogitsProcessor {
             })
             .collect();
         Ok(vec_ret)
+    }
+
+    pub fn compute_log_softmax(&self, logits: &Tensor) -> Result<Tensor> {
+        // vLLM V1 computes logprobs from raw logits WITHOUT temperature scaling
+        // Temperature is only applied during sampling, not for logprobs computation
+        
+        // Compute log_softmax = logits - log(sum(exp(logits)))
+        let max_logits = logits.max_keepdim(D::Minus1)?;
+        let shifted = logits.broadcast_sub(&max_logits)?;
+        let exp_shifted = shifted.exp()?;
+        let sum_exp = exp_shifted.sum_keepdim(D::Minus1)?;
+        let log_sum_exp = sum_exp.log()?;
+        let log_probs = shifted.broadcast_sub(&log_sum_exp)?;
+        
+        Ok(log_probs)
+    }
+
+    pub fn extract_top_logprobs(
+        &self,
+        log_probs: &Tensor,
+        top_n: usize,
+        tokenizer: Option<&tokenizers::Tokenizer>,
+    ) -> Result<Vec<Vec<TopLogprob>>> {
+        let batch = log_probs.dims()[0];
+        let vocab_size = log_probs.dims()[1];
+        
+        // Get top-k indices and values
+        let (top_values, top_indices) = if top_n >= vocab_size {
+            log_probs.sort_last_dim(false)?
+        } else {
+            let TopKOutput { values, indices } = log_probs.topk(top_n)?;
+            (values, indices)
+        };
+        
+        let top_values: Vec<Vec<f32>> = top_values.to_vec2()?;
+        let top_indices: Vec<Vec<u32>> = top_indices.to_vec2()?;
+        
+        let results: Vec<Vec<TopLogprob>> = (0..batch)
+            .into_par_iter()
+            .map(|b| {
+                let mut top_logprobs = Vec::new();
+                for i in 0..top_n.min(top_indices[b].len()) {
+                    let token = top_indices[b][i] as usize;
+                    let logprob = top_values[b][i];
+                    
+                    let bytes = if let Some(tok) = tokenizer {
+                        tok.id_to_token(token as u32)
+                            .unwrap_or_else(|| format!("<{}>", token))
+                    } else {
+                        format!("<{}>", token)
+                    };
+                    
+                    top_logprobs.push(TopLogprob {
+                        token,
+                        logprob,
+                        bytes,
+                    });
+                }
+                top_logprobs
+            })
+            .collect();
+        
+        Ok(results)
+    }
+
+    pub fn sample_with_logprobs(
+        &self,
+        logits: &Tensor,
+        sampling_params: &Option<SamplingParams>,
+        tokenizer: Option<&tokenizers::Tokenizer>,
+    ) -> Result<Vec<SamplingResult>> {
+        let logits = logits.to_dtype(DType::F32)?;
+        let batch = logits.layout().dims()[0];
+        
+        // vLLM V1: Compute log probabilities from RAW logits (before any adjustments)
+        // This is different from V0 which computed logprobs after temperature/penalties
+        let log_probs = self.compute_log_softmax(&logits)?;
+        
+        // Get top logprobs if requested (also from raw logits)
+        let num_top_logprobs = sampling_params
+            .as_ref()
+            .and_then(|p| p.logprobs)
+            .unwrap_or(0);
+        
+        let top_logprobs = if num_top_logprobs > 0 {
+            self.extract_top_logprobs(&log_probs, num_top_logprobs, tokenizer)?
+        } else {
+            vec![vec![]; batch]
+        };
+
+        // Sample tokens using existing logic (WITH temperature/penalties applied)
+        // Note: Sampling applies temperature internally, but logprobs remain from raw logits
+        let next_tokens = self.sample(&logits, sampling_params)?;
+        
+        // Extract log probabilities for the sampled tokens (from raw logprobs)
+        let log_probs_vec: Vec<Vec<f32>> = log_probs.to_vec2()?;
+        
+        let results: Vec<SamplingResult> = next_tokens
+            .into_iter()
+            .enumerate()
+            .map(|(b, token)| {
+                let logprob = log_probs_vec[b][token as usize];
+                SamplingResult {
+                    token,
+                    logprob,
+                    top_logprobs: top_logprobs[b].clone(),
+                }
+            })
+            .collect();
+        
+        Ok(results)
+    }
+
+    pub fn sample_with_logprobs_and_penalties(
+        &self,
+        logits: &Tensor,
+        sampling_params: &Option<SamplingParams>,
+        penalties: Vec<f32>,
+        reference_tokens: Vec<Vec<u32>>,
+        tokenizer: Option<&tokenizers::Tokenizer>,
+    ) -> Result<Vec<SamplingResult>> {
+        let logits = logits.to_dtype(DType::F32)?;
+        let batch = logits.layout().dims()[0];
+        
+        // vLLM V1: Compute log probabilities from RAW logits (before penalties)
+        let log_probs = self.compute_log_softmax(&logits)?;
+        
+        // Get top logprobs if requested (from raw logits, before penalties)
+        let num_top_logprobs = sampling_params
+            .as_ref()
+            .and_then(|p| p.logprobs)
+            .unwrap_or(0);
+        
+        let top_logprobs = if num_top_logprobs > 0 {
+            self.extract_top_logprobs(&log_probs, num_top_logprobs, tokenizer)?
+        } else {
+            vec![vec![]; batch]
+        };
+
+        // Apply penalties only for sampling (not for logprobs)
+        let penalized_logits = if penalties.iter().any(|&v| v != 1.0 && v != 0.) {
+            self.apply_batch_repeat_penalty(&logits, penalties, reference_tokens)?
+        } else {
+            logits.clone()
+        };
+
+        // Sample tokens using penalized logits
+        let next_tokens = self.sample(&penalized_logits, sampling_params)?;
+        
+        // Extract log probabilities for the sampled tokens (from RAW logprobs, not penalized)
+        let log_probs_vec: Vec<Vec<f32>> = log_probs.to_vec2()?;
+        
+        let results: Vec<SamplingResult> = next_tokens
+            .into_iter()
+            .enumerate()
+            .map(|(b, token)| {
+                let logprob = log_probs_vec[b][token as usize];
+                SamplingResult {
+                    token,
+                    logprob,
+                    top_logprobs: top_logprobs[b].clone(),
+                }
+            })
+            .collect();
+        
+        Ok(results)
     }
 
     pub fn sample(

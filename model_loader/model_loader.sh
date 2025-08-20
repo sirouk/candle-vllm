@@ -22,6 +22,67 @@ echo -e "${BLUE}    Candle-vLLM Model Loader${NC}"
 echo -e "${BLUE}======================================${NC}"
 echo ""
 
+# Function to check if Rust is installed and install if needed
+check_rust_installation() {
+    if command -v rustc &> /dev/null && command -v cargo &> /dev/null; then
+        echo -e "${GREEN}✓ Rust is already installed${NC}"
+        echo -e "${GREEN}  rustc version: $(rustc --version)${NC}"
+        echo -e "${GREEN}  cargo version: $(cargo --version)${NC}"
+        return 0
+    else
+        echo -e "${YELLOW}⚠ Rust is not installed or not in PATH${NC}"
+        echo -e "${YELLOW}Installing Rust using rustup...${NC}"
+        
+        if curl https://sh.rustup.rs -sSf | sh -s -- -y; then
+            # Source the cargo environment
+            source "$HOME/.cargo/env"
+            
+            # Verify installation
+            if command -v rustc &> /dev/null && command -v cargo &> /dev/null; then
+                echo -e "${GREEN}✓ Rust installed successfully!${NC}"
+                echo -e "${GREEN}  rustc version: $(rustc --version)${NC}"
+                echo -e "${GREEN}  cargo version: $(cargo --version)${NC}"
+                return 0
+            else
+                echo -e "${RED}✗ Rust installation failed or not in PATH${NC}"
+                echo -e "${RED}Please restart your shell or run: source \"\$HOME/.cargo/env\"${NC}"
+                return 1
+            fi
+        else
+            echo -e "${RED}✗ Failed to install Rust${NC}"
+            echo -e "${RED}Please install Rust manually from https://rustup.rs/${NC}"
+            return 1
+        fi
+    fi
+}
+
+# Function to check directory location and adjust if needed
+check_directory_location() {
+    # Check if we're in the project root (contains Cargo.toml and model_loader/ directory)
+    if [[ -f "Cargo.toml" && -d "model_loader" && -f "model_loader/model_loader.sh" ]]; then
+        echo -e "${GREEN}✓ Running from project root directory${NC}"
+        PROJECT_ROOT="$(pwd)"
+        MODEL_LOADER_DIR="$(pwd)/model_loader"
+        BINARY_PATH="./target/release/candle-vllm"
+        CARGO_CMD_PREFIX=""
+        return 0
+    # Check if we're in the model_loader directory (original behavior)
+    elif [[ -f "model_loader.sh" && -f "../Cargo.toml" ]]; then
+        echo -e "${GREEN}✓ Running from model_loader directory${NC}"
+        PROJECT_ROOT="$(cd .. && pwd)"
+        MODEL_LOADER_DIR="$(pwd)"
+        BINARY_PATH="../target/release/candle-vllm"
+        CARGO_CMD_PREFIX="cd .. && "
+        return 0
+    else
+        echo -e "${RED}✗ Please run this script from either:${NC}"
+        echo -e "${RED}  1. The project root directory (contains Cargo.toml)${NC}"
+        echo -e "${RED}  2. The model_loader directory${NC}"
+        echo -e "${RED}Current directory: $(pwd)${NC}"
+        return 1
+    fi
+}
+
 # Function to detect platform and set build features
 detect_platform() {
     local os=$(uname -s)
@@ -42,23 +103,78 @@ detect_platform() {
     esac
 }
 
-# Function to check if candle-vllm is built
+# Function to check if candle-vllm is built and build it if needed
 check_build() {
-    if [[ ! -f "../target/release/candle-vllm" ]]; then
-        echo -e "${YELLOW}Warning: candle-vllm binary not found in ../target/release/${NC}"
-        echo -e "${YELLOW}You may need to build it first with: cd .. && cargo build --release --features $FEATURES${NC}"
+    if [[ ! -f "$BINARY_PATH" ]]; then
+        echo -e "${YELLOW}Warning: candle-vllm binary not found at $BINARY_PATH${NC}"
+        echo -e "${BLUE}Building candle-vllm with features: $FEATURES${NC}"
         echo ""
-        read -p "Do you want to continue anyway? (y/n): " -n 1 -r
+        
+        read -p "Build candle-vllm now? (y/n): " -n 1 -r
         echo ""
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            exit 1
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            echo -e "${GREEN}Building candle-vllm...${NC}"
+            echo -e "${YELLOW}This may take several minutes...${NC}"
+            echo ""
+            
+            # Run the build command
+            local build_cmd="${CARGO_CMD_PREFIX}cargo build --release --features $FEATURES"
+            echo -e "${BLUE}Running: $build_cmd${NC}"
+            
+            if eval "$build_cmd"; then
+                echo ""
+                echo -e "${GREEN}✓ Build completed successfully!${NC}"
+                
+                # Verify the binary was created
+                if [[ -f "$BINARY_PATH" ]]; then
+                    echo -e "${GREEN}✓ Binary found at: $BINARY_PATH${NC}"
+                else
+                    echo -e "${RED}✗ Build completed but binary not found at expected location${NC}"
+                    return 1
+                fi
+            else
+                echo ""
+                echo -e "${RED}✗ Build failed!${NC}"
+                echo -e "${RED}Please check the error messages above and try again${NC}"
+                return 1
+            fi
+        else
+            echo -e "${YELLOW}Build skipped. You may need to build manually later.${NC}"
+            echo -e "${YELLOW}Command: ${CARGO_CMD_PREFIX}cargo build --release --features $FEATURES${NC}"
+            return 1
         fi
+    else
+        echo -e "${GREEN}✓ candle-vllm binary found at: $BINARY_PATH${NC}"
     fi
 }
+
+# Check Rust installation
+echo ""
+echo -e "${BLUE}Checking Rust installation...${NC}"
+if ! check_rust_installation; then
+    echo -e "${RED}✗ Rust installation check failed. Exiting.${NC}"
+    exit 1
+fi
+
+# Check directory location
+echo ""
+echo -e "${BLUE}Checking directory location...${NC}"
+if ! check_directory_location; then
+    echo -e "${RED}✗ Directory check failed. Exiting.${NC}"
+    exit 1
+fi
 
 # Detect platform and set features
 FEATURES=$(detect_platform)
 echo -e "${GREEN}Detected platform features: $FEATURES${NC}"
+
+# Check if candle-vllm is built and build if needed
+echo ""
+echo -e "${BLUE}Checking candle-vllm build status...${NC}"
+if ! check_build; then
+    echo -e "${RED}✗ Build check failed. Exiting.${NC}"
+    exit 1
+fi
 
 # Check HF token status
 echo ""
@@ -77,8 +193,6 @@ else
     echo -e "${YELLOW}  3. The script will prompt you for a token when needed${NC}"
     echo -e "${YELLOW}  Get a token at: https://huggingface.co/settings/tokens${NC}"
 fi
-
-check_build
 
 # Model categories and definitions (model_id:type format)
 BITTENSOR_MODELS=(
@@ -185,7 +299,7 @@ get_model_command() {
     local mem="${4:-$DEFAULT_MEM}"
     local dtype="${5:-$DEFAULT_DTYPE}"
     
-    local cmd="cd .. && cargo run --release --features $FEATURES --"
+    local cmd="${CARGO_CMD_PREFIX}cargo run --release --features $FEATURES --"
     cmd="$cmd --p $port --mem $mem --dtype $dtype"
     
     # Add HF token if available

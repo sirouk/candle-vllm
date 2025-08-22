@@ -92,7 +92,17 @@ detect_platform() {
             ;;
         Linux*)
             if command -v nvidia-smi &> /dev/null; then
-                echo "cuda,nccl"
+                # Check if we have a binary built without NCCL
+                if [[ -f "./target/release/candle-vllm" ]]; then
+                    # Try to run the binary to see if it has NCCL issues
+                    if timeout 5s ./target/release/candle-vllm --help &>/dev/null; then
+                        echo "cuda"
+                    else
+                        echo "cuda"
+                    fi
+                else
+                    echo "cuda"
+                fi
             else
                 echo "cpu"
             fi
@@ -101,6 +111,73 @@ detect_platform() {
             echo "cpu"
             ;;
     esac
+}
+
+# Function to set up CUDA environment variables
+setup_cuda_environment() {
+    if [[ "$FEATURES" == *"cuda"* ]]; then
+        echo -e "${BLUE}Setting up CUDA environment...${NC}"
+        
+        # Check if nvcc is available
+        if ! command -v nvcc &> /dev/null; then
+            # Try to find nvcc in common CUDA installation paths
+            local cuda_paths=(
+                "/usr/local/cuda-12.8/bin"
+                "/usr/local/cuda-12.7/bin"
+                "/usr/local/cuda-12.6/bin"
+                "/usr/local/cuda-12.5/bin"
+                "/usr/local/cuda-12.4/bin"
+                "/usr/local/cuda-12.3/bin"
+                "/usr/local/cuda-12.2/bin"
+                "/usr/local/cuda-12.1/bin"
+                "/usr/local/cuda-12.0/bin"
+                "/usr/local/cuda-11.8/bin"
+                "/usr/local/cuda-11.7/bin"
+                "/usr/local/cuda-11.6/bin"
+                "/usr/local/cuda-11.5/bin"
+                "/usr/local/cuda-11.4/bin"
+                "/usr/local/cuda-11.3/bin"
+                "/usr/local/cuda-11.2/bin"
+                "/usr/local/cuda-11.1/bin"
+                "/usr/local/cuda-11.0/bin"
+                "/usr/local/cuda-10.2/bin"
+                "/usr/local/cuda-10.1/bin"
+                "/usr/local/cuda-10.0/bin"
+            )
+            
+            local cuda_found=false
+            for cuda_path in "${cuda_paths[@]}"; do
+                if [[ -f "$cuda_path/nvcc" ]]; then
+                    echo -e "${GREEN}Found CUDA at: $cuda_path${NC}"
+                    export PATH="$cuda_path:$PATH"
+                    export CUDA_ROOT="$cuda_path/.."
+                    export CUDA_PATH="$cuda_path/.."
+                    export CUDA_TOOLKIT_ROOT_DIR="$cuda_path/.."
+                    cuda_found=true
+                    break
+                fi
+            done
+            
+            if [[ "$cuda_found" == false ]]; then
+                echo -e "${YELLOW}Warning: nvcc not found in PATH or common CUDA locations${NC}"
+                echo -e "${YELLOW}CUDA compilation may fail. Please install CUDA toolkit.${NC}"
+                return 1
+            fi
+        else
+            echo -e "${GREEN}✓ nvcc found in PATH${NC}"
+            # Set CUDA environment variables based on nvcc location
+            local nvcc_path=$(which nvcc)
+            local cuda_root=$(dirname "$nvcc_path")/..
+            export CUDA_ROOT="$cuda_root"
+            export CUDA_PATH="$cuda_root"
+            export CUDA_TOOLKIT_ROOT_DIR="$cuda_root"
+        fi
+        
+        echo -e "${GREEN}✓ CUDA environment variables set${NC}"
+        echo -e "${BLUE}  CUDA_ROOT: $CUDA_ROOT${NC}"
+        echo -e "${BLUE}  CUDA_PATH: $CUDA_PATH${NC}"
+        echo -e "${BLUE}  CUDA_TOOLKIT_ROOT_DIR: $CUDA_TOOLKIT_ROOT_DIR${NC}"
+    fi
 }
 
 # Function to check if candle-vllm is built and build it if needed
@@ -167,6 +244,11 @@ fi
 # Detect platform and set features
 FEATURES=$(detect_platform)
 echo -e "${GREEN}Detected platform features: $FEATURES${NC}"
+
+# Set up CUDA environment if needed
+if ! setup_cuda_environment; then
+    echo -e "${YELLOW}Warning: CUDA environment setup failed, but continuing...${NC}"
+fi
 
 # Check if candle-vllm is built and build if needed
 echo ""

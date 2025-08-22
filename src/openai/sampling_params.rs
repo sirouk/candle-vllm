@@ -4,20 +4,91 @@ use std::ops::Range;
 
 const SAMPLING_EPS: f32 = 1e-5;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 // Top-n logprobs element
 pub struct TopLogprob {
-    pub token: usize,
+    pub token_id: usize, // Keep internal as usize for compatibility
     pub logprob: f32,
     pub bytes: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl serde::Serialize for TopLogprob {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("TopLogprob", 3)?;
+        state.serialize_field("token", &self.bytes)?; // Output token as string
+        state.serialize_field("logprob", &self.logprob)?;
+        state.serialize_field("bytes", &self.bytes)?;
+        state.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for TopLogprob {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        struct Helper {
+            token_id: usize,
+            logprob: f32,
+            bytes: String,
+        }
+        let helper = Helper::deserialize(deserializer)?;
+        Ok(TopLogprob {
+            token_id: helper.token_id,
+            logprob: helper.logprob,
+            bytes: helper.bytes,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Logprobs {
-    pub token: usize,
+    pub token_id: usize, // Keep internal as usize for compatibility
     pub logprob: f32,
     pub bytes: String,
     pub top_logprobs: Vec<TopLogprob>,
+}
+
+impl serde::Serialize for Logprobs {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::ser::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("Logprobs", 4)?;
+        state.serialize_field("token", &self.bytes)?; // Output token as string
+        state.serialize_field("logprob", &self.logprob)?;
+        state.serialize_field("bytes", &self.bytes)?;
+        state.serialize_field("top_logprobs", &self.top_logprobs)?;
+        state.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Logprobs {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        struct Helper {
+            token_id: usize,
+            logprob: f32,
+            bytes: String,
+            top_logprobs: Vec<TopLogprob>,
+        }
+        let helper = Helper::deserialize(deserializer)?;
+        Ok(Logprobs {
+            token_id: helper.token_id,
+            logprob: helper.logprob,
+            bytes: helper.bytes,
+            top_logprobs: helper.top_logprobs,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

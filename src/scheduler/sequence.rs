@@ -84,7 +84,7 @@ impl _Sequence {
     }
 
     pub fn add_token(&mut self, logprobs: Logprobs) {
-        self.append_token_to_blocks(logprobs.token);
+        self.append_token_to_blocks(logprobs.token_id);
         self.deref_mut().append_token_id(logprobs);
     }
 
@@ -129,7 +129,7 @@ impl _Sequence {
             self.deref()
                 .output_token_ids
                 .iter()
-                .map(|logprobs| logprobs.token)
+                .map(|logprobs| logprobs.token_id)
                 .clone(),
         );
         res
@@ -139,7 +139,7 @@ impl _Sequence {
         if self.deref().output_token_ids.is_empty() {
             *self.deref().prompt_token_ids.last().unwrap()
         } else {
-            self.deref().output_token_ids.last().unwrap().token
+            self.deref().output_token_ids.last().unwrap().token_id
         }
     }
 

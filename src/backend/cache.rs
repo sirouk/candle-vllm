@@ -494,8 +494,8 @@ pub fn swap_blocks(src: Tensor, dst: &Tensor, block_mapping: HashMap<usize, usiz
 // CPU fallback implementations when neither CUDA nor Metal features are enabled
 #[cfg(not(any(feature = "cuda", feature = "metal")))]
 pub fn copy_blocks(
-    key_cache: Vec<&mut candle_core::Tensor>,
-    value_cache: Vec<&mut candle_core::Tensor>,
+    mut key_cache: Vec<&mut candle_core::Tensor>,
+    _value_cache: Vec<&mut candle_core::Tensor>,
     block_mapping: HashMap<usize, Vec<usize>>,
 ) -> candle_core::Result<()> {
     // For CPU, we can implement a simple copy operation
@@ -504,9 +504,9 @@ pub fn copy_blocks(
         for dst_block in dst_blocks {
             for cache in key_cache.iter_mut() {
                 // Simple element-wise copy for CPU tensors
-                let src_start = src_block * cache.dims()[0];
-                let dst_start = dst_block * cache.dims()[0];
-                let block_size = cache.dims()[0];
+                let _src_start = src_block * cache.dims()[0];
+                let _dst_start = dst_block * cache.dims()[0];
+                let _block_size = cache.dims()[0];
                 
                 // This is a simplified implementation
                 // In production, you'd want to implement proper tensor slicing and copying
@@ -519,9 +519,9 @@ pub fn copy_blocks(
 
 #[cfg(not(any(feature = "cuda", feature = "metal")))]
 pub fn swap_blocks(
-    src: candle_core::Tensor,
-    dst: &mut candle_core::Tensor,
-    block_mapping: HashMap<usize, usize>,
+    _src: candle_core::Tensor,
+    _dst: &mut candle_core::Tensor,
+    _block_mapping: HashMap<usize, usize>,
 ) -> candle_core::Result<()> {
     // For CPU, implement a simple swap operation
     // This is a basic stub - proper implementation would require actual tensor operations

@@ -1,12 +1,18 @@
 use axum::{
     http::{self, Method},
-    routing::post,
+    routing::{post, get},
     Router,
 };
 use candle_core::{DType, Device, Result};
 #[cfg(feature = "nccl")]
 use candle_vllm::backend::heartbeat;
-use candle_vllm::openai::openai_server::chat_completions;
+use candle_vllm::openai::openai_server::{
+    chat_completions, 
+    get_performance_metrics, 
+    get_performance_summary, 
+    run_performance_benchmark, 
+    health_check_with_metrics
+};
 use candle_vllm::openai::pipelines::llm_engine::LLMEngine;
 use candle_vllm::openai::pipelines::pipeline::DefaultLoader;
 use candle_vllm::openai::sampling_params::GenerationConfig;
@@ -113,7 +119,7 @@ struct Args {
     prefill_chunk_size: Option<usize>,
 }
 
-fn get_cache_config(
+fn create_cache_config(
     kvcache_mem_gpu: usize,
     kvcache_mem_cpu: usize,
     block_size: usize,
@@ -122,6 +128,8 @@ fn get_cache_config(
     num_shards: usize,
 ) -> CacheConfig {
     let dsize = kv_dtype.size_in_bytes();
+    
+    // Revert to original calculation for stability
     let num_gpu_blocks = kvcache_mem_gpu * SIZE_IN_MB
         / dsize
         / block_size
@@ -136,12 +144,15 @@ fn get_cache_config(
         / config.k_head_dim()
         / config.num_hidden_layers
         / 2;
+    
     CacheConfig {
         block_size,
         num_gpu_blocks: Some(num_gpu_blocks),
         num_cpu_blocks: Some(num_cpu_blocks),
         fully_init: true,
         dtype: kv_dtype,
+        pre_allocate: true,
+        lock_free: true,
     }
 }
 
@@ -380,7 +391,7 @@ async fn main() -> Result<()> {
             } else {
                 dtype
             };
-            let cache_cfg = get_cache_config(
+            let cache_cfg = create_cache_config(
                 args.kvcache_mem_gpu,
                 args.kvcache_mem_cpu, //dummy 512MB for cpu
                 args.block_size,
@@ -482,6 +493,10 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .layer(cors_layer)
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/performance/metrics", post(get_performance_metrics))
+        .route("/v1/performance/summary", get(get_performance_summary))
+        .route("/v1/performance/benchmark", post(run_performance_benchmark))
+        .route("/v1/health", get(health_check_with_metrics))
         .with_state(Arc::new(server_data));
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))

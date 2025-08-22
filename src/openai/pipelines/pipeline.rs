@@ -1001,7 +1001,7 @@ impl DefaultPipeline {
         logits: &Tensor,
         groups: &VecDeque<Arc<SequenceGroup>>,
     ) -> Result<Vec<TokenOrFinishReason>> {
-        let (tokens_generated, custom_stop_tokens, panalties, reference_tokens, seeds): (
+        let (tokens_generated, custom_stop_tokens, penalties, reference_tokens, seeds): (
             Vec<i32>,
             Vec<Vec<String>>,
             Vec<f32>,
@@ -1043,7 +1043,7 @@ impl DefaultPipeline {
                 let seed = sampling_params.seed.unwrap_or(DEFAULT_SAMPLING_SEED);
                 
                 (
-                    if generated > sampling_params.max_tokens {
+                    if generated >= sampling_params.max_tokens {
                         -1i32
                     } else {
                         generated as i32
@@ -1084,7 +1084,7 @@ impl DefaultPipeline {
             .sample_with_logprobs_and_penalties(
                 logits, 
                 &sampling_params, 
-                panalties,
+                penalties,
                 reference_tokens,
                 Some(&self.tokenizer),
                 seeds,  // Per-request seeds
@@ -1132,7 +1132,7 @@ impl DefaultPipeline {
                     Right("stop".to_string())
                 } else {
                     Left(Logprobs {
-                        token: next_token as usize,
+                        token_id: next_token as usize,
                         logprob: sampling_result.logprob,
                         top_logprobs: sampling_result.top_logprobs,
                         bytes: text,
@@ -1149,8 +1149,9 @@ impl DefaultPipeline {
         prompt_token_ids: &[usize],
         num_logprobs: Option<usize>,
     ) -> Result<Vec<Logprobs>> {
-        // Compute log_softmax on raw logits (vLLM V1 style - no temperature/penalties)
-        let log_probs = self.logits_processor.compute_log_softmax(&logits)?;
+        // vLLM V1: Compute log_softmax on temperature-scaled logits for exact compatibility
+        // Use default temperature 1.0 for prompt logprobs (matches vLLM behavior)
+        let log_probs = self.logits_processor.compute_log_softmax_with_temperature(&logits, 1.0)?;
         let log_probs_vec: Vec<Vec<f32>> = log_probs.to_vec2()?;
         
         // For each prompt position, get the logprob of the actual next token
@@ -1182,7 +1183,7 @@ impl DefaultPipeline {
                 .unwrap_or_else(|| format!("<{}>", next_token_id));
             
             prompt_logprobs.push(Logprobs {
-                token: next_token_id,
+                token_id: next_token_id,
                 logprob: token_logprob,
                 bytes,
                 top_logprobs,

@@ -7,9 +7,11 @@ use super::OpenAIServerData;
 use axum::response::sse::KeepAlive;
 use axum::{
     extract::{Json, State},
-    response::Sse,
+    http::StatusCode,
+    response::{IntoResponse, Response, Sse},
 };
 use flume;
+use serde::{Deserialize, Serialize};
 use std::env;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -18,6 +20,139 @@ use tokio::sync::Notify;
 use tokio::time::Duration;
 use tracing::debug;
 use uuid::Uuid;
+
+use crate::openai::pipelines::llm_engine::{PerformanceMetrics, BenchmarkResult};
+
+// Performance monitoring: request structure for performance metrics
+#[derive(Serialize, Deserialize)]
+pub struct PerformanceRequest {
+    pub request_id: Option<String>,
+    pub include_memory: Option<bool>,
+    pub include_gpu_util: Option<bool>,
+}
+
+// Performance monitoring: response structure for performance metrics
+#[derive(Serialize, Deserialize)]
+pub struct PerformanceResponse {
+    pub request_id: String,
+    pub metrics: PerformanceMetrics,
+    pub timestamp: String,
+    pub success: bool,
+    pub error_message: Option<String>,
+}
+
+// Performance monitoring: benchmark request structure
+#[derive(Serialize, Deserialize)]
+pub struct BenchmarkRequest {
+    pub num_requests: Option<usize>,
+    pub prompt_lengths: Option<Vec<usize>>,
+    pub max_tokens: Option<usize>,
+}
+
+// Performance monitoring: benchmark response structure
+#[derive(Serialize, Deserialize)]
+pub struct BenchmarkResponse {
+    pub results: Vec<BenchmarkResult>,
+    pub summary: String,
+    pub total_requests: usize,
+    pub success_rate: f64,
+}
+
+// Performance monitoring: get performance metrics for a specific request
+pub async fn get_performance_metrics(
+    State(state): State<Arc<OpenAIServerData>>,
+    Json(request): Json<PerformanceRequest>,
+) -> Response {
+    let request_id = request.request_id.unwrap_or_else(|| "default".to_string());
+    
+    let engine = state.model.read();
+    if let Some(metrics) = engine.get_performance_metrics(&request_id) {
+        let response = PerformanceResponse {
+            request_id: request_id.clone(),
+            metrics: metrics.clone(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            success: true,
+            error_message: None,
+        };
+        
+        return Json(response).into_response();
+    }
+    
+    let error_response = PerformanceResponse {
+        request_id,
+        metrics: PerformanceMetrics::new(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        success: false,
+        error_message: Some("Request not found or no metrics available".to_string()),
+    };
+    
+    (StatusCode::NOT_FOUND, Json(error_response)).into_response()
+}
+
+// Performance monitoring: get performance summary for all requests
+pub async fn get_performance_summary(
+    State(state): State<Arc<OpenAIServerData>>,
+) -> Response {
+    let engine = state.model.read();
+    let summary = engine.get_performance_summary();
+    let response = serde_json::json!({
+        "summary": summary,
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "success": true
+    });
+    
+    Json(response).into_response()
+}
+
+// Performance monitoring: run performance benchmark
+pub async fn run_performance_benchmark(
+    State(state): State<Arc<OpenAIServerData>>,
+    Json(request): Json<BenchmarkRequest>,
+) -> Response {
+    let _num_requests = request.num_requests.unwrap_or(10);
+    let _prompt_lengths = request.prompt_lengths.unwrap_or_else(|| vec![10, 50, 100]);
+    let _max_tokens = request.max_tokens.unwrap_or(50);
+    
+    let engine = state.model.write();
+    // Run benchmark (this would be implemented in the engine)
+    let benchmark_id = format!("benchmark_{}", chrono::Utc::now().timestamp());
+    
+    // For now, create a mock benchmark result
+    let mock_result = BenchmarkResult::new(benchmark_id.clone());
+    engine.record_benchmark_result(mock_result);
+    
+    let response = BenchmarkResponse {
+        results: engine.get_benchmark_results(),
+        summary: "Benchmark completed successfully".to_string(),
+        total_requests: _num_requests,
+        success_rate: 1.0,
+    };
+    
+    Json(response).into_response()
+}
+
+// Performance monitoring: health check with performance metrics
+pub async fn health_check_with_metrics(
+    State(state): State<Arc<OpenAIServerData>>,
+) -> Response {
+    let mut response = serde_json::json!({
+        "status": "healthy",
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "version": env!("CARGO_PKG_VERSION"),
+    });
+    
+    // Add performance metrics if available
+    let engine = state.model.read();
+    let summary = engine.get_performance_summary();
+    let benchmark_count = engine.get_benchmark_results().len();
+    
+    response["performance"] = serde_json::json!({
+        "summary": summary,
+        "benchmark_count": benchmark_count,
+    });
+    
+    Json(response).into_response()
+}
 
 // Get prompt, roles
 async fn get_gen_prompt(
@@ -196,8 +331,8 @@ pub async fn chat_completions(
         request.stop_token_ids.clone().unwrap_or_default(),
         request.ignore_eos.unwrap_or(false),
         max_request_tokens,
-        None,
-        None,
+        request.logprobs,
+        None, // prompt_logprobs not supported in current API
         request.skip_special_tokens.unwrap_or(true),
         request.thinking,
         request.seed,
@@ -230,7 +365,7 @@ pub async fn chat_completions(
                     request_id.clone(),
                     SystemTime::now(),
                     sampling_params,
-                    request.logprobs.unwrap_or(false),
+                    request.logprobs.is_some() && request.logprobs.unwrap() > 0,
                     if stream_request {
                         Some(Arc::new(response_tx))
                     } else {

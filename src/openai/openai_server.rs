@@ -331,7 +331,7 @@ pub async fn chat_completions(
         request.stop_token_ids.clone().unwrap_or_default(),
         request.ignore_eos.unwrap_or(false),
         max_request_tokens,
-        request.logprobs,
+        request.logprobs.clone().into(),
         None, // prompt_logprobs not supported in current API
         request.skip_special_tokens.unwrap_or(true),
         request.thinking,
@@ -365,7 +365,7 @@ pub async fn chat_completions(
                     request_id.clone(),
                     SystemTime::now(),
                     sampling_params,
-                    request.logprobs.is_some() && request.logprobs.unwrap() > 0,
+                    request.logprobs.0.is_some() && request.logprobs.0.unwrap() > 0,
                     if stream_request {
                         Some(Arc::new(response_tx))
                     } else {

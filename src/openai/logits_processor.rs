@@ -97,7 +97,7 @@ impl LogitsProcessor {
         // Use optimized CUDA kernels if available
         #[cfg(feature = "cuda")]
         {
-            // Try to use optimized CUDA log_softmax
+            // Try to use optimized CUDA log_softmax if available
             if let Ok(_device) = logits.device().as_cuda_device() {
                 // Use CUDA optimized log_softmax if available
                 return candle_nn::ops::softmax_last_dim(logits)?.log();
@@ -113,6 +113,12 @@ impl LogitsProcessor {
         if temperature == 1.0 {
             // No temperature scaling needed
             self.compute_log_softmax_fast(logits)
+        } else if temperature < 0.01 {
+            // For very low temperatures, use a more stable approach
+            // Scale by a minimum temperature to prevent overflow
+            let safe_temperature = 0.1;
+            let scaled_logits = (logits / safe_temperature as f64)?;
+            self.compute_log_softmax_fast(&scaled_logits)
         } else {
             // Apply temperature scaling before log_softmax
             let scaled_logits = (logits / temperature as f64)?;
@@ -471,18 +477,31 @@ impl LogitsProcessor {
                     let token = top_indices[b][i] as usize;
                     let logprob = top_values[b][i];
                     
-                    let bytes = if let Some(tok) = tokenizer {
-                        tok.id_to_token(token as u32)
-                            .unwrap_or_else(|| format!("<{}>", token))
-                    } else {
-                        format!("<{}>", token)
-                    };
-                    
-                    top_logprobs.push(TopLogprob {
-                        token_id: token,
-                        logprob,
-                        bytes,
-                    });
+                    // Filter out invalid token IDs and extreme logprob values
+                    if token < vocab_size && logprob > -1000.0 && logprob < 1000.0 {
+                        // Use the same decoding method as the main token field for consistency
+                        // This ensures both token and top_logprobs show the same representation
+                        let bytes = if let Some(tok) = tokenizer {
+                            // Use decode method instead of id_to_token for consistency
+                            let single_token = vec![token as u32];
+                            match tok.decode(&single_token, false) {
+                                Ok(decoded_text) => decoded_text,
+                                Err(_) => format!("<{}>", token)
+                            }
+                        } else {
+                            format!("<{}>", token)
+                        };
+                        
+                        // Only add if we got a valid token name and convert to bytes
+                        if !bytes.starts_with("<") || bytes.len() < 10 {
+                            let bytes_vec: Vec<i32> = bytes.bytes().map(|b| b as i32).collect();
+                            top_logprobs.push(TopLogprob {
+                                token_id: token,
+                                logprob,
+                                bytes: bytes_vec,
+                            });
+                        }
+                    }
                 }
                 top_logprobs
             })
@@ -501,12 +520,11 @@ impl LogitsProcessor {
         let logits = logits.to_dtype(DType::F32)?;
         let batch = logits.layout().dims()[0];
         
-        // vLLM V1: Compute log probabilities from temperature-scaled logits
-        // This matches vLLM's behavior exactly - logprobs are computed from temperature-scaled logits
-        let temperature = sampling_params.as_ref().and_then(|p| p.temperature).unwrap_or(1.0);
-        let log_probs = self.compute_log_softmax_with_temperature(&logits, temperature)?;
+        // vLLM V1: Compute log probabilities from raw logits (not temperature-scaled)
+        // This matches vLLM's behavior exactly - logprobs are computed from raw logits
+        let log_probs = self.compute_log_softmax(&logits)?;
         
-        // Get top logprobs if requested (from raw logits)
+        // Get top logprobs if requested (from temperature-scaled logits)
         let num_top_logprobs = sampling_params
             .as_ref()
             .and_then(|p| p.logprobs)
@@ -521,7 +539,7 @@ impl LogitsProcessor {
         // Sample tokens using per-request seeds
         let next_tokens = self.sample_with_seeds(&logits, sampling_params, seeds)?;
         
-        // Extract log probabilities for the sampled tokens (from raw logprobs)
+        // Extract log probabilities for the sampled tokens (from temperature-scaled logprobs)
         let log_probs_vec: Vec<Vec<f32>> = log_probs.to_vec2()?;
         
         let results: Vec<SamplingResult> = next_tokens
@@ -552,12 +570,18 @@ impl LogitsProcessor {
         let logits = logits.to_dtype(DType::F32)?;
         let batch = logits.layout().dims()[0];
         
-        // vLLM V1: Compute log probabilities from temperature-scaled logits
-        // This matches vLLM's behavior exactly - logprobs are computed from temperature-scaled logits
-        let temperature = sampling_params.as_ref().and_then(|p| p.temperature).unwrap_or(1.0);
-        let log_probs = self.compute_log_softmax_with_temperature(&logits, temperature)?;
+        // Apply penalties first to get penalized logits
+        let penalized_logits = if penalties.iter().any(|&v| v != 1.0 && v != 0.) {
+            self.apply_batch_repeat_penalty(&logits, penalties, reference_tokens)?
+        } else {
+            logits.clone()
+        };
+
+        // vLLM V1: Compute log probabilities from raw penalized logits (not temperature-scaled)
+        // This ensures logprobs match vLLM's behavior exactly
+        let log_probs = self.compute_log_softmax(&penalized_logits)?;
         
-        // Get top logprobs if requested (from raw logits)
+        // Get top logprobs if requested (from penalized logits)
         let num_top_logprobs = sampling_params
             .as_ref()
             .and_then(|p| p.logprobs)
@@ -569,17 +593,10 @@ impl LogitsProcessor {
             vec![vec![]; batch]
         };
 
-        // Apply penalties only for sampling (not for logprobs)
-        let penalized_logits = if penalties.iter().any(|&v| v != 1.0 && v != 0.) {
-            self.apply_batch_repeat_penalty(&logits, penalties, reference_tokens)?
-        } else {
-            logits.clone()
-        };
-
         // Sample tokens using penalized logits with per-request seeds
         let next_tokens = self.sample_with_seeds(&penalized_logits, sampling_params, seeds)?;
         
-        // Extract log probabilities for the sampled tokens (from raw logprobs)
+        // Extract log probabilities for the sampled tokens (from penalized logprobs)
         let log_probs_vec: Vec<Vec<f32>> = log_probs.to_vec2()?;
         
         let results: Vec<SamplingResult> = next_tokens

@@ -982,10 +982,16 @@ impl LLMEngine {
                                 None
                             };
                             
+                            // Extract text content from logprobs bytes
+                            let content = {
+                                let bytes_u8: Vec<u8> = logprobs.bytes.iter().map(|&b| b as u8).collect();
+                                String::from_utf8_lossy(&bytes_u8).to_string()
+                            };
+                            
                             let chunk = e.get_stream_response(
                                 group.request_id.clone(),
                                 group.arrival_time,
-                                Some(logprobs.bytes.clone()),
+                                Some(content),
                                 None,
                                 Some(logprobs.clone()),
                                 prompt_logprobs,

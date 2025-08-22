@@ -16,6 +16,8 @@ Features:
 - EOS token special handling  
 - Random sampling strategy for token checking
 - Complete quality scoring with penalty system
+
+UPDATED: Now compatible with candle-vllm's new numeric bytes format and raw logprobs calculation.
 """
 
 import math
@@ -164,7 +166,8 @@ class SN19EnhancedBenchmark:
     
     def make_enhanced_request(self, url: str, test_num: int) -> Dict:
         """
-        Make a LIVE enhanced request that captures all validation data in real-time
+        Make a LIVE enhanced request that captures all validation data in real-time.
+        Updated to handle both vLLM and candle-vllm formats (numeric vs string bytes).
         """
         payload = {
             "model": self.model,
@@ -220,11 +223,28 @@ class SN19EnhancedBenchmark:
                                 if 'content' in logprobs and logprobs['content']:
                                     for item in logprobs['content']:
                                         result['token_count'] += 1
+                                        
+                                        # Handle both formats: numeric bytes (candle-vllm) and string bytes (vLLM)
+                                        bytes_data = item.get('bytes', [])
+                                        if isinstance(bytes_data, list) and len(bytes_data) > 0:
+                                            # Numeric bytes format (candle-vllm) - convert to string for compatibility
+                                            if isinstance(bytes_data[0], int):
+                                                try:
+                                                    # Convert numeric bytes to string
+                                                    token_text = ''.join([chr(b) for b in bytes_data])
+                                                except (ValueError, OverflowError):
+                                                    token_text = item.get('token', '')
+                                            else:
+                                                token_text = item.get('token', '')
+                                        else:
+                                            token_text = item.get('token', '')
+                                        
                                         result['tokens'].append({
-                                            'token': item.get('token', ''),
-                                            'logprob': item.get('logprob', 0)
+                                            'token': token_text,
+                                            'logprob': item.get('logprob', 0),
+                                            'raw_bytes': bytes_data  # Store original bytes for debugging
                                         })
-                                        result['full_text'] += item.get('token', '')
+                                        result['full_text'] += token_text
                                         
                                         # Store top logprobs for validation
                                         top_probs = item.get('top_logprobs', [])
@@ -347,18 +367,21 @@ class SN19EnhancedBenchmark:
         print("🚀 ENHANCED SUBNET 19 BENCHMARK WITH FULL VALIDATION")
         print("=" * 80)
         print("\n🔴 LIVE TEST MODE: All results from real-time API calls")
+        print("✅ UPDATED: Now compatible with candle-vllm's new format")
         print("\nThis benchmark includes:")
         print("  • Complete Rayonlabs validation logic")
         print("  • Token rank validation")
         print("  • Failed token tracking")
         print("  • Random sampling strategy")
         print("  • Penalty system for violations")
+        print("  • Updated for numeric bytes format and raw logprobs")
         
         print(f"\nConfiguration:")
         print(f"  Model: {self.model}")
         print(f"  Temperature: {self.temperature}")
         print(f"  Max Tokens: {self.max_tokens}")
         print(f"  Seed: {self.seed}")
+        print(f"  Note: Updated for candle-vllm's new numeric bytes format")
         
         all_results = []
         
@@ -377,6 +400,7 @@ class SN19EnhancedBenchmark:
             print("📊 AGGREGATE RESULTS FROM LIVE TESTS")
             print("="*80)
             print(f"\n✅ Analysis based on {len(all_results)} successful live test(s)")
+            print("✅ Updated for candle-vllm's new format (numeric bytes, raw logprobs)")
             
             # Quality scores
             base_scores = [r['base_score'] for r in all_results]
@@ -424,11 +448,17 @@ class SN19EnhancedBenchmark:
                 print("   • Different sampling behavior between engines")
                 print("   • Potential quality issues in production")
                 print("   • Need for engine-specific tuning")
+            
+            print(f"\n✅ Format Compatibility:")
+            print("   • Updated for candle-vllm's numeric bytes format")
+            print("   • Handles both vLLM (string bytes) and candle-vllm (numeric bytes)")
+            print("   • Compatible with new raw logprobs calculation")
 
 def main():
     print("Enhanced Subnet 19 Benchmark")
     print("Based on complete Rayonlabs validation from:")
     print("https://github.com/rayonlabs/vision-workers/.../text.py")
+    print("✅ UPDATED: Now compatible with candle-vllm's new format")
     
     # Check server availability
     servers_ok = True
@@ -457,6 +487,7 @@ def main():
     print("\n" + "="*80)
     print("🏁 ENHANCED BENCHMARK COMPLETE")
     print("="*80)
+    print("✅ Updated for candle-vllm's new numeric bytes format and raw logprobs calculation")
 
 if __name__ == "__main__":
     main()

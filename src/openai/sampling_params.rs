@@ -9,8 +9,28 @@ const SAMPLING_EPS: f32 = 1e-5;
 pub struct TopLogprob {
     pub token_id: usize, // Keep internal as usize for compatibility
     pub logprob: f32,
-    pub bytes: String,
+    pub bytes: Vec<i32>, // Use integer array to match vLLM format exactly
 }
+
+// Custom wrapper that forces array serialization
+#[derive(Debug, Clone)]
+pub struct ByteArray(pub Vec<u8>);
+
+impl serde::Serialize for ByteArray {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeSeq;
+        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+        for &byte in &self.0 {
+            seq.serialize_element(&byte)?;
+        }
+        seq.end()
+    }
+}
+
+
 
 impl serde::Serialize for TopLogprob {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -19,8 +39,12 @@ impl serde::Serialize for TopLogprob {
     {
         use serde::ser::SerializeStruct;
         let mut state = serializer.serialize_struct("TopLogprob", 3)?;
-        state.serialize_field("token", &self.bytes)?; // Output token as string
+        // Convert bytes to string for token field to match vLLM
+        let bytes_u8: Vec<u8> = self.bytes.iter().map(|&b| b as u8).collect();
+        let token_str = String::from_utf8_lossy(&bytes_u8);
+        state.serialize_field("token", &token_str)?;
         state.serialize_field("logprob", &self.logprob)?;
+        // Serialize bytes as array of integers to match vLLM format
         state.serialize_field("bytes", &self.bytes)?;
         state.end()
     }
@@ -41,7 +65,7 @@ impl<'de> serde::Deserialize<'de> for TopLogprob {
         Ok(TopLogprob {
             token_id: helper.token_id,
             logprob: helper.logprob,
-            bytes: helper.bytes,
+            bytes: helper.bytes.bytes().map(|b| b as i32).collect(),
         })
     }
 }
@@ -50,7 +74,7 @@ impl<'de> serde::Deserialize<'de> for TopLogprob {
 pub struct Logprobs {
     pub token_id: usize, // Keep internal as usize for compatibility
     pub logprob: f32,
-    pub bytes: String,
+    pub bytes: Vec<i32>, // Use integer array to match vLLM format exactly
     pub top_logprobs: Vec<TopLogprob>,
 }
 
@@ -61,8 +85,12 @@ impl serde::Serialize for Logprobs {
     {
         use serde::ser::SerializeStruct;
         let mut state = serializer.serialize_struct("Logprobs", 4)?;
-        state.serialize_field("token", &self.bytes)?; // Output token as string
+        // Convert bytes to string for token field to match vLLM
+        let bytes_u8: Vec<u8> = self.bytes.iter().map(|&b| b as u8).collect();
+        let token_str = String::from_utf8_lossy(&bytes_u8);
+        state.serialize_field("token", &token_str)?;
         state.serialize_field("logprob", &self.logprob)?;
+        // Serialize bytes as array of integers to match vLLM format
         state.serialize_field("bytes", &self.bytes)?;
         state.serialize_field("top_logprobs", &self.top_logprobs)?;
         state.end()
@@ -85,7 +113,7 @@ impl<'de> serde::Deserialize<'de> for Logprobs {
         Ok(Logprobs {
             token_id: helper.token_id,
             logprob: helper.logprob,
-            bytes: helper.bytes,
+            bytes: helper.bytes.bytes().map(|b| b as i32).collect(),
             top_logprobs: helper.top_logprobs,
         })
     }

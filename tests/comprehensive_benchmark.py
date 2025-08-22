@@ -156,6 +156,7 @@ class SN19ComprehensiveBenchmark:
     def make_streaming_request(self, url: str, test_num: int) -> Tuple[List[Dict], float, float, int]:
         """
         Make a LIVE streaming request and measure real-time performance metrics.
+        Updated to handle both vLLM and candle-vllm formats (numeric vs string bytes).
         Returns: (logprobs_data, time_to_first_token, total_time, token_count)
         """
         payload = {
@@ -207,11 +208,28 @@ class SN19ComprehensiveBenchmark:
                                 for item in content_logprobs:
                                     if 'token' in item and 'logprob' in item:
                                         token_count += 1
+                                        
+                                        # Handle both formats: numeric bytes (candle-vllm) and string bytes (vLLM)
+                                        bytes_data = item.get('bytes', [])
+                                        if isinstance(bytes_data, list) and len(bytes_data) > 0:
+                                            # Numeric bytes format (candle-vllm) - convert to string for compatibility
+                                            if isinstance(bytes_data[0], int):
+                                                try:
+                                                    # Convert numeric bytes to string
+                                                    token_text = ''.join([chr(b) for b in bytes_data])
+                                                except (ValueError, OverflowError):
+                                                    token_text = item.get('token', '')
+                                            else:
+                                                token_text = item.get('token', '')
+                                        else:
+                                            token_text = item.get('token', '')
+                                        
                                         logprobs_data.append({
-                                            'token': item['token'],
-                                            'logprob': item['logprob']
+                                            'token': token_text,
+                                            'logprob': item['logprob'],
+                                            'raw_bytes': bytes_data  # Store original bytes for debugging
                                         })
-                                        tokens_text.append(item['token'])
+                                        tokens_text.append(token_text)
                         except json.JSONDecodeError:
                             continue
             
@@ -289,6 +307,7 @@ class SN19ComprehensiveBenchmark:
         print(f"  Number of tests per engine: {self.num_tests}")
         print(f"  Seed: {self.seed}")
         print(f"  Temperature: 0.01 (near-deterministic)")
+        print(f"  Note: Updated for candle-vllm's new numeric bytes format")
         
         # Test vLLM with LIVE requests
         print(f"\n🔵 LIVE Testing vLLM ({self.vllm_url}):")
@@ -637,11 +656,13 @@ class SN19ComprehensiveBenchmark:
         print("• Monitor performance under production load")
         print("• Consider standardizing across all miners")
         print("• Regular benchmarking recommended")
+        print("• Updated for candle-vllm's new numeric bytes format and raw logprobs calculation")
     
     def run_comprehensive_benchmark(self):
         """Run the complete comprehensive benchmark suite with LIVE tests"""
         print("\n🔴 LIVE MODE: All benchmarks use real-time API calls")
-        print("No cached or pre-computed data is used\n")
+        print("No cached or pre-computed data is used")
+        print("✅ UPDATED: Now compatible with candle-vllm's new format (numeric bytes, raw logprobs)\n")
         
         # Phase 1: LIVE Performance Benchmark
         all_distances = self.run_performance_benchmark()
@@ -665,6 +686,7 @@ class SN19ComprehensiveBenchmark:
         self.generate_final_summary(ttft_ratio, tps_ratio, avg_distance, quality_score)
         
         print("\n✅ All analysis above is based on LIVE test data collected in real-time")
+        print("✅ UPDATED: Now compatible with candle-vllm's new numeric bytes format and raw logprobs calculation")
         
         return {
             'quality_score': quality_score,
@@ -680,6 +702,7 @@ def main():
     print("🚀 SUBNET 19 COMPREHENSIVE BENCHMARK SUITE")
     print("=" * 80)
     print("\n🔴 LIVE TEST MODE: All results from real-time execution")
+    print("✅ UPDATED: Now compatible with candle-vllm's new format")
     print("\nThis all-in-one benchmark includes:")
     print("  Phase 1: LIVE Performance Benchmarking (TTFT, TPS)")
     print("  Phase 2: Performance Statistical Analysis")
@@ -725,6 +748,7 @@ def main():
     print("\n✅ All results above are from LIVE tests executed in real-time")
     print("Results have been analyzed using the exact Subnet 19 scoring algorithm")
     print("from github.com/rayonlabs/vision-workers/.../text.py")
+    print("✅ UPDATED: Now compatible with candle-vllm's new numeric bytes format and raw logprobs calculation")
     
     # Save results summary
     with open('benchmark_results.json', 'w') as f:
@@ -734,7 +758,8 @@ def main():
             'avg_distance': results['avg_distance'],
             'ttft_ratio': results['ttft_ratio'],
             'tps_ratio': results['tps_ratio'],
-            'num_tests': len(results['vllm_results'])
+            'num_tests': len(results['vllm_results']),
+            'note': 'Updated for candle-vllm new format (numeric bytes, raw logprobs)'
         }, f, indent=2)
     
     print("\n📁 Results saved to benchmark_results.json")

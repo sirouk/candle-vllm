@@ -94,7 +94,7 @@ struct Args {
 
     /// Maximum waiting time for processing parallel requests (in milliseconds).
     /// A larger value means the engine can hold more requests and process them in a single generation call.
-    #[arg(long, default_value_t = 100)] // Reduced from 500ms for faster TTFT
+    #[arg(long, default_value_t = 25)] // Reduced from 100ms to 25ms for ultra-fast TTFT
     holding_time: usize,
 
     //Whether the program is forced running in multithread model for parallel inference (for debug)
@@ -130,8 +130,8 @@ fn create_cache_config(
 ) -> CacheConfig {
     let dsize = kv_dtype.size_in_bytes();
     
-    // Performance optimization: use smaller block sizes for faster TTFT
-    let optimized_block_size = std::cmp::min(block_size, 16); // Reduced from 32 for faster allocation
+    // Performance optimization: use ultra-small block sizes for fastest TTFT
+    let optimized_block_size = std::cmp::min(block_size, 8); // Reduced from 16 to 8 for fastest allocation
     
     // Performance optimization: increase GPU block allocation for better TPS
     let num_gpu_blocks = (kvcache_mem_gpu * SIZE_IN_MB
@@ -141,7 +141,7 @@ fn create_cache_config(
         / config.k_head_dim()
         / config.num_hidden_layers
         / 2)
-        .saturating_add(10); // Add buffer for better performance
+        .saturating_add(20); // Increased buffer for better performance
     
     let num_cpu_blocks = (kvcache_mem_cpu * SIZE_IN_MB
         / dsize
@@ -150,7 +150,7 @@ fn create_cache_config(
         / config.k_head_dim()
         / config.num_hidden_layers
         / 2)
-        .saturating_add(5); // Add buffer for better performance
+        .saturating_add(10); // Increased buffer for better performance
     
     CacheConfig {
         block_size: optimized_block_size,

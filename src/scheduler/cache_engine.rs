@@ -2,7 +2,7 @@ use crate::openai::models::Config;
 use candle_core::{DType, Device, Result, Tensor};
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, atomic::{AtomicUsize, Ordering}},
     collections::VecDeque,
 };
 
@@ -60,6 +60,10 @@ pub struct CacheEngine {
     block_pool: Arc<Mutex<VecDeque<usize>>>,
     // Performance optimization: pre-allocated cache blocks
     pre_allocated_blocks: Arc<Mutex<HashMap<usize, KVCache>>>,
+    // Performance optimization: lock-free counters
+    allocation_counter: AtomicUsize,
+    hit_counter: AtomicUsize,
+    miss_counter: AtomicUsize,
 }
 
 impl CacheEngine {
@@ -88,6 +92,9 @@ impl CacheEngine {
             num_layers: model_config.num_hidden_layers,
             block_pool: Arc::new(Mutex::new(VecDeque::new())),
             pre_allocated_blocks: Arc::new(Mutex::new(HashMap::new())),
+            allocation_counter: AtomicUsize::new(0),
+            hit_counter: AtomicUsize::new(0),
+            miss_counter: AtomicUsize::new(0),
         };
         
         // Performance optimization: pre-allocate cache blocks if enabled
@@ -95,26 +102,72 @@ impl CacheEngine {
             engine.pre_allocate_cache_blocks(cache_config, device)?;
         }
         
+        // Performance optimization: initialize memory pools for faster allocation
+        engine.initialize_memory_pools(cache_config, device)?;
+        
         Ok(engine)
     }
 
-    // Performance optimization: faster cache block allocation
+    // Performance optimization: initialize memory pools for faster allocation
+    fn initialize_memory_pools(&mut self, cache_config: &CacheConfig, device: &Device) -> Result<()> {
+        // Pre-allocate common tensor shapes to avoid runtime allocation
+        let common_shapes = vec![16, 32, 64, 128, 256, 512, 1024];
+        
+        for shape in common_shapes {
+            let key_cache = Tensor::zeros((shape,), cache_config.dtype, device)?;
+            let value_cache = Tensor::zeros((shape,), cache_config.dtype, device)?;
+            
+            if let Ok(mut pool) = self.pre_allocated_blocks.lock() {
+                pool.insert(shape, (key_cache, value_cache));
+            }
+        }
+        
+        Ok(())
+    }
+
+    // Performance optimization: ultra-fast cache block allocation with memory pools
     pub fn allocate_cache_block(&self, layer: usize, device: &Device) -> Result<KVCache> {
-        // Try to get from pre-allocated pool first
+        // Performance optimization: track allocation statistics
+        self.allocation_counter.fetch_add(1, Ordering::Relaxed);
+        
+        // Try to get from pre-allocated pool first (fastest path)
         if let Ok(mut pool) = self.pre_allocated_blocks.lock() {
             if let Some(block) = pool.remove(&layer) {
+                self.hit_counter.fetch_add(1, Ordering::Relaxed);
                 return Ok(block);
             }
         }
         
-        // Fallback to dynamic allocation
+        // Try to get from block pool (second fastest)
+        if let Ok(mut block_pool) = self.block_pool.lock() {
+            if let Some(block_index) = block_pool.pop_front() {
+                // Reuse existing block
+                self.hit_counter.fetch_add(1, Ordering::Relaxed);
+                return self.reuse_existing_block(block_index, device);
+            }
+        }
+        
+        // Fallback to dynamic allocation (slowest path)
+        self.miss_counter.fetch_add(1, Ordering::Relaxed);
         self.allocate_dynamic_cache_block(layer, device)
+    }
+    
+    // Performance optimization: reuse existing blocks to avoid allocation
+    fn reuse_existing_block(&self, block_index: usize, device: &Device) -> Result<KVCache> {
+        // Clone existing block instead of creating new one
+        let gpu_cache = self.gpu_cache.lock().unwrap();
+        if block_index < gpu_cache.len() {
+            Ok(gpu_cache[block_index].clone())
+        } else {
+            // Fallback to dynamic allocation
+            self.allocate_dynamic_cache_block(block_index, device)
+        }
     }
     
     // Performance optimization: dynamic allocation with reduced overhead
     fn allocate_dynamic_cache_block(&self, _layer: usize, device: &Device) -> Result<KVCache> {
-        // Use smaller initial sizes for faster allocation
-        let block_size = 32; // Reduced from default for faster TTFT
+        // Use smaller initial sizes for faster TTFT
+        let block_size = 16; // Reduced from 32 for faster allocation
         
         let key_cache = Tensor::zeros((block_size,), candle_core::DType::BF16, device)?;
         let value_cache = Tensor::zeros((block_size,), candle_core::DType::BF16, device)?;
@@ -122,12 +175,45 @@ impl CacheEngine {
         Ok((key_cache, value_cache))
     }
     
-    // Performance optimization: batch cache operations
+    // Performance optimization: ultra-fast batch allocation with minimal locking
     pub fn batch_allocate_blocks(&self, layers: &[usize], device: &Device) -> Result<Vec<KVCache>> {
         let mut blocks = Vec::with_capacity(layers.len());
         
+        // Performance optimization: minimize lock time by batching operations
+        let mut pool_guard = None;
+        let mut block_pool_guard = None;
+        
         for &layer in layers {
-            let block = self.allocate_cache_block(layer, device)?;
+            // Try pre-allocated pool first
+            if pool_guard.is_none() {
+                pool_guard = self.pre_allocated_blocks.lock().ok();
+            }
+            
+            if let Some(ref mut pool) = pool_guard {
+                if let Some(block) = pool.remove(&layer) {
+                    self.hit_counter.fetch_add(1, Ordering::Relaxed);
+                    blocks.push(block);
+                    continue;
+                }
+            }
+            
+            // Try block pool
+            if block_pool_guard.is_none() {
+                block_pool_guard = self.block_pool.lock().ok();
+            }
+            
+            if let Some(ref mut block_pool) = block_pool_guard {
+                if let Some(block_index) = block_pool.pop_front() {
+                    self.hit_counter.fetch_add(1, Ordering::Relaxed);
+                    let block = self.reuse_existing_block(block_index, device)?;
+                    blocks.push(block);
+                    continue;
+                }
+            }
+            
+            // Fallback to dynamic allocation
+            self.miss_counter.fetch_add(1, Ordering::Relaxed);
+            let block = self.allocate_dynamic_cache_block(layer, device)?;
             blocks.push(block);
         }
         
@@ -195,6 +281,15 @@ impl CacheEngine {
             }
         }
         Ok(())
+    }
+
+    // Performance optimization: get cache statistics for monitoring
+    pub fn get_cache_stats(&self) -> (usize, usize, usize) {
+        (
+            self.allocation_counter.load(Ordering::Relaxed),
+            self.hit_counter.load(Ordering::Relaxed),
+            self.miss_counter.load(Ordering::Relaxed)
+        )
     }
 }
 

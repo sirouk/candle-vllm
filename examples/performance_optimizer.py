@@ -64,16 +64,27 @@ class PerformanceOptimizer:
         """Find optimal parameters for best performance"""
         print("🔧 Optimizing candle-vllm performance parameters...")
         
-        # Test different configurations
+        # Test different configurations with more aggressive settings
         configs = [
-            {"block_size": 16, "holding_time": 50},
-            {"block_size": 32, "holding_time": 100},
-            {"block_size": 64, "holding_time": 200},
-            {"prefill_chunk_size": 4096},
-            {"prefill_chunk_size": 8192},
-            {"max_num_seqs": 64},
-            {"max_num_seqs": 128},
-            {"max_num_seqs": 256},
+            # Ultra-fast TTFT configurations
+            {"block_size": 8, "holding_time": 25},
+            {"block_size": 16, "holding_time": 25},
+            {"block_size": 32, "holding_time": 25},
+            
+            # Aggressive TPS configurations
+            {"max_num_seqs": 128, "holding_time": 25},
+            {"max_num_seqs": 256, "holding_time": 25},
+            {"max_num_seqs": 512, "holding_time": 25},
+            
+            # Memory optimization configurations
+            {"prefill_chunk_size": 4096, "holding_time": 25},
+            {"prefill_chunk_size": 8192, "holding_time": 25},
+            {"prefill_chunk_size": 16384, "holding_time": 25},
+            
+            # Combined optimizations
+            {"block_size": 8, "max_num_seqs": 256, "holding_time": 25},
+            {"block_size": 16, "max_num_seqs": 512, "holding_time": 25},
+            {"prefill_chunk_size": 8192, "max_num_seqs": 256, "holding_time": 25},
         ]
         
         best_config = {}
@@ -84,7 +95,8 @@ class PerformanceOptimizer:
             ttft, tps = self.test_performance(config)
             
             # Score based on TTFT and TPS (lower is better)
-            score = ttft / 1000 + (1.0 / max(tps, 0.1))  # Weighted score
+            # Weight TTFT more heavily for better responsiveness
+            score = (ttft / 1000) * 2.0 + (1.0 / max(tps, 0.1))  # Weighted score favoring TTFT
             
             print(f"  TTFT: {ttft:.1f}ms, TPS: {tps:.1f}, Score: {score:.3f}")
             

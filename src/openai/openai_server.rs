@@ -333,6 +333,7 @@ pub async fn chat_completions(
         max_request_tokens,
         request.logprobs.clone().into(),
         None, // prompt_logprobs not supported in current API
+        request.top_logprobs.clone().into(),
         request.skip_special_tokens.unwrap_or(true),
         request.thinking,
         request.seed,

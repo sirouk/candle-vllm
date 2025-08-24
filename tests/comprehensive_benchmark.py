@@ -14,6 +14,7 @@ This single script combines all analysis features:
 - Sensitivity Analysis
 - Risk Assessment
 - Final Recommendations
+- TOP_LOGPROBS Support: Configurable boolean/integer values for detailed token analysis
 
 Based on the exact Rayonlabs scoring algorithm from:
 https://github.com/rayonlabs/vision-workers/blob/main/validator_orchestrator/app/checking/functions/text.py
@@ -39,7 +40,16 @@ MAX_CHECKS = 5                  # Maximum token positions to check
 DEFAULT_NUM_LOGPROBS = 20       # Number of top logprobs to request
 
 class SN19ComprehensiveBenchmark:
-    """Complete benchmarking and analysis suite for Subnet 19"""
+    """
+    Complete benchmarking and analysis suite for Subnet 19
+    
+    Features:
+    - Configurable top_logprobs parameter (boolean or integer)
+    - Boolean True: defaults to 5 alternatives
+    - Boolean False: no top alternatives
+    - Integer N: top N alternatives with probabilities
+    - Automatic validation and configuration
+    """
     
     def __init__(self):
         self.alternative_vllm_url = "http://localhost:2000/v1/chat/completions"
@@ -53,11 +63,60 @@ class SN19ComprehensiveBenchmark:
         self.seed = 4321
         self.temperature = 0.01  # Near-deterministic
         
+        # Logprobs configuration
+        self.top_logprobs = 5  # Number of top logprobs to request (can be boolean or number)
+        
+        # Validate top_logprobs parameter
+        self._validate_top_logprobs()
+        
         # Store results for analysis
         self.vllm_results = []
         self.alternative_results = []
         self.quality_scores = []
         self.validation_results = []
+    
+    def _validate_top_logprobs(self):
+        """Validate the top_logprobs parameter"""
+        if isinstance(self.top_logprobs, bool):
+            if self.top_logprobs:
+                self.top_logprobs = 5  # Default to 5 if True
+        elif isinstance(self.top_logprobs, int):
+            if self.top_logprobs < 0:
+                raise ValueError("top_logprobs must be non-negative")
+            if self.top_logprobs > 100:
+                print(f"⚠️  Warning: top_logprobs={self.top_logprobs} is very high, may impact performance")
+        else:
+            raise ValueError("top_logprobs must be boolean or integer")
+    
+    def configure_top_logprobs(self, value):
+        """Configure the top_logprobs parameter"""
+        self.top_logprobs = value
+        self._validate_top_logprobs()
+        print(f"✅ Configured top_logprobs to: {self.top_logprobs}")
+    
+    def demonstrate_top_logprobs_configs(self):
+        """Demonstrate different top_logprobs configurations"""
+        print("\n🔧 TOP_LOGPROBS Configuration Examples:")
+        print("-" * 60)
+        
+        configs = [
+            (True, "Boolean True (defaults to 5)"),
+            (False, "Boolean False (no top logprobs)"),
+            (3, "Integer 3 (top 3 alternatives)"),
+            (10, "Integer 10 (top 10 alternatives)"),
+            (20, "Integer 20 (top 20 alternatives)")
+        ]
+        
+        for value, description in configs:
+            try:
+                self.configure_top_logprobs(value)
+                print(f"  {value}: {description}")
+            except ValueError as e:
+                print(f"  {value}: ❌ {e}")
+        
+        # Reset to default
+        self.top_logprobs = 5
+        print(f"\n✅ Reset to default: top_logprobs = {self.top_logprobs}")
     
     def calculate_distance(self, validator_logprob: float, miner_logprob: float) -> float:
         """SN19 exact distance calculation"""
@@ -164,6 +223,7 @@ class SN19ComprehensiveBenchmark:
             "messages": [{"role": "user", "content": self.test_prompt}],
             "max_tokens": self.max_tokens,
             "logprobs": True,
+            "top_logprobs": self.top_logprobs,
             "stream": True,
             "seed": self.seed,
             "temperature": 0.01  # Near-deterministic
@@ -307,6 +367,7 @@ class SN19ComprehensiveBenchmark:
         print(f"  Number of tests per engine: {self.num_tests}")
         print(f"  Seed: {self.seed}")
         print(f"  Temperature: 0.01 (near-deterministic)")
+        print(f"  Top logprobs: {self.top_logprobs}")
         print(f"  Note: Updated for candle-vllm's new numeric bytes format")
         
         # Test vLLM with LIVE requests
@@ -662,7 +723,8 @@ class SN19ComprehensiveBenchmark:
         """Run the complete comprehensive benchmark suite with LIVE tests"""
         print("\n🔴 LIVE MODE: All benchmarks use real-time API calls")
         print("No cached or pre-computed data is used")
-        print("✅ UPDATED: Now compatible with candle-vllm's new format (numeric bytes, raw logprobs)\n")
+        print("✅ UPDATED: Now compatible with candle-vllm's new format (numeric bytes, raw logprobs)")
+        print(f"✅ TOP_LOGPROBS: Configured to {self.top_logprobs}\n")
         
         # Phase 1: LIVE Performance Benchmark
         all_distances = self.run_performance_benchmark()
@@ -687,6 +749,7 @@ class SN19ComprehensiveBenchmark:
         
         print("\n✅ All analysis above is based on LIVE test data collected in real-time")
         print("✅ UPDATED: Now compatible with candle-vllm's new numeric bytes format and raw logprobs calculation")
+        print(f"✅ TOP_LOGPROBS: Used {self.top_logprobs} for all requests")
         
         return {
             'quality_score': quality_score,
@@ -695,7 +758,8 @@ class SN19ComprehensiveBenchmark:
             'tps_ratio': tps_ratio,
             'distances': all_distances,
             'vllm_results': self.vllm_results,
-            'alternative_results': self.alternative_results
+            'alternative_results': self.alternative_results,
+            'top_logprobs': self.top_logprobs
         }
 
 def main():
@@ -740,6 +804,15 @@ def main():
     
     # Run comprehensive benchmark
     benchmark = SN19ComprehensiveBenchmark()
+    
+    # Demonstrate top_logprobs configurations
+    benchmark.demonstrate_top_logprobs_configs()
+    
+    # You can also configure custom values:
+    # benchmark.configure_top_logprobs(10)  # Request top 10 alternatives
+    # benchmark.configure_top_logprobs(False)  # No top logprobs
+    # benchmark.configure_top_logprobs(True)   # Default to 5
+    
     results = benchmark.run_comprehensive_benchmark()
     
     print("\n" + "="*80)

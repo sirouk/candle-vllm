@@ -1,9 +1,9 @@
 {
-  "timestamp": "2025-08-22T22:52:03.723484",
+  "timestamp": "2025-08-24T08:21:36.643652",
   "quality_score": 1.0,
-  "avg_distance": 0.00963021061816073,
-  "ttft_ratio": 25.627070001791004,
-  "tps_ratio": 0.4985707077244729,
+  "avg_distance": 0.008465669318616417,
+  "ttft_ratio": 26.71290875418823,
+  "tps_ratio": 0.5048047701564015,
   "num_tests": 3,
   "note": "Updated for candle-vllm new format (numeric bytes, raw logprobs)"
 }

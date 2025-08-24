@@ -772,7 +772,7 @@ impl LLMEngine {
                         let (pipeline, _) = e.get_pipeline(rank).unwrap();
                         
                         for group in scheduled.iter() {
-                            if let Some(prompt_logprobs_num) = group.sampling_params.prompt_logprobs {
+                            if group.sampling_params.prompt_logprobs.is_some() {
                                 let seq = group.get_seqs().values().next().unwrap();
                                 let prompt_ids = seq.deref().get_token_ids();
                                 
@@ -782,7 +782,7 @@ impl LLMEngine {
                                     let prompt_logprobs = pipeline.compute_prompt_logprobs(
                                         &logits,
                                         &prompt_ids,
-                                        Some(prompt_logprobs_num),
+                                        group.sampling_params.top_logprobs,
                                     )?;
                                     
                                     seq.deref_mut().set_prompt_logprobs(prompt_logprobs);

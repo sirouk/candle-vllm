@@ -92,6 +92,7 @@ impl serde::Serialize for Logprobs {
         state.serialize_field("logprob", &self.logprob)?;
         // Serialize bytes as array of integers to match vLLM format
         state.serialize_field("bytes", &self.bytes)?;
+        // Always serialize top_logprobs (empty array if no top logprobs requested)
         state.serialize_field("top_logprobs", &self.top_logprobs)?;
         state.end()
     }
@@ -107,6 +108,7 @@ impl<'de> serde::Deserialize<'de> for Logprobs {
             token_id: usize,
             logprob: f32,
             bytes: String,
+            #[serde(default)]
             top_logprobs: Vec<TopLogprob>,
         }
         let helper = Helper::deserialize(deserializer)?;
@@ -186,6 +188,8 @@ pub struct SamplingParams {
     pub logprobs: Option<usize>,
     /// Num of log probs to return per prompt token.
     pub prompt_logprobs: Option<usize>,
+    /// Number of top logprobs to return per token. If specified, overrides the logprobs field.
+    pub top_logprobs: Option<usize>,
     /// Skip special toks in output.
     /// rec. default = true
     pub skip_special_tokens: bool,
@@ -217,6 +221,7 @@ impl SamplingParams {
         max_tokens: usize,
         logprobs: Option<usize>,
         prompt_logprobs: Option<usize>,
+        top_logprobs: Option<usize>,
         skip_special_tokens: bool,
         thinking: Option<bool>,
         seed: Option<u64>,
@@ -240,6 +245,7 @@ impl SamplingParams {
             max_tokens,
             logprobs,
             prompt_logprobs,
+            top_logprobs,
             skip_special_tokens,
             thinking,
             seed,

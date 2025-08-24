@@ -1147,7 +1147,7 @@ impl DefaultPipeline {
         &self,
         logits: &Tensor,
         prompt_token_ids: &[usize],
-        num_logprobs: Option<usize>,
+        top_logprobs: Option<usize>,
     ) -> Result<Vec<Logprobs>> {
         // vLLM V1: Compute log_softmax on temperature-scaled logits for exact compatibility
         // Use default temperature 1.0 for prompt logprobs (matches vLLM behavior)
@@ -1162,8 +1162,8 @@ impl DefaultPipeline {
             let next_token_id = prompt_token_ids[i + 1];
             let token_logprob = log_probs_vec[i][next_token_id];
             
-            // Get top logprobs if requested
-            let top_logprobs = if let Some(n) = num_logprobs {
+            // Get top logprobs if requested - use top_logprobs if specified, otherwise no top_logprobs
+            let top_logprobs = if let Some(n) = top_logprobs {
                 if n > 0 {
                     self.logits_processor
                         .extract_top_logprobs(&log_probs.narrow(0, i, 1)?, n, Some(&self.tokenizer))?

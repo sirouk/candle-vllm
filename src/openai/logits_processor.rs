@@ -59,9 +59,10 @@ impl LogitsProcessor {
         };
         
         // Get top logprobs if requested (from raw logits)
+        // Only return top_logprobs if explicitly requested via top_logprobs parameter
         let num_top_logprobs = sampling_params
             .as_ref()
-            .and_then(|p| p.logprobs)
+            .and_then(|p| p.top_logprobs)
             .unwrap_or(0);
         
         let top_logprobs = if num_top_logprobs > 0 {
@@ -525,9 +526,10 @@ impl LogitsProcessor {
         let log_probs = self.compute_log_softmax(&logits)?;
         
         // Get top logprobs if requested (from temperature-scaled logits)
+        // Only return top_logprobs if explicitly requested via top_logprobs parameter
         let num_top_logprobs = sampling_params
             .as_ref()
-            .and_then(|p| p.logprobs)
+            .and_then(|p| p.top_logprobs)
             .unwrap_or(0);
         
         let top_logprobs = if num_top_logprobs > 0 {
@@ -582,9 +584,10 @@ impl LogitsProcessor {
         let log_probs = self.compute_log_softmax(&penalized_logits)?;
         
         // Get top logprobs if requested (from penalized logits)
+        // Only return top_logprobs if explicitly requested via top_logprobs parameter
         let num_top_logprobs = sampling_params
             .as_ref()
-            .and_then(|p| p.logprobs)
+            .and_then(|p| p.top_logprobs)
             .unwrap_or(0);
         
         let top_logprobs = if num_top_logprobs > 0 {

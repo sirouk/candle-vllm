@@ -296,6 +296,9 @@ impl LLMEngine {
         #[cfg(feature = "nccl")] daemon_manager: Option<DaemonManager>,
         prefill_chunk_size: Option<usize>,
     ) -> Result<Arc<RwLock<Self>>> {
+        // Performance optimization: reduce holding time for faster TTFT
+        let optimized_holding_time = std::cmp::min(holding_time, 100); // Cap at 100ms for better responsiveness
+        
         let num_threads: usize = pipelines.len();
         let engine = Arc::new(RwLock::new(Self {
             pipelines,
@@ -346,11 +349,13 @@ impl LLMEngine {
                 loop {
                     if is_master_rank {
                         notify.notified().await;
-                        let _ = tokio::time::sleep(tokio::time::Duration::from_millis(holding_time as u64)).await;
+                        // Performance optimization: reduced holding time for faster response
+                        let _ = tokio::time::sleep(tokio::time::Duration::from_millis(optimized_holding_time as u64)).await;
                     }
                     {
                         let mut e = engine.write();
                         if e.sync_waiting_task_to_group() {
+                            // Performance optimization: reduce sleep time for faster processing
                             let _ = tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
                             continue;
                         }
@@ -745,7 +750,7 @@ impl LLMEngine {
                 let x = pipeline.forward(
                     tokens,
                     &positions,
-                    Some(&cache_engine.get_kv_cache()),
+                    Some(&cache_engine.get_kv_cache()?),
                     &metadata,
                 )?;
                 

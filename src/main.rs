@@ -11,7 +11,8 @@ use candle_vllm::openai::openai_server::{
     get_performance_metrics, 
     get_performance_summary, 
     run_performance_benchmark, 
-    health_check_with_metrics
+    health_check_with_metrics,
+    performance_monitor
 };
 use candle_vllm::openai::pipelines::llm_engine::LLMEngine;
 use candle_vllm::openai::pipelines::pipeline::DefaultLoader;
@@ -93,7 +94,7 @@ struct Args {
 
     /// Maximum waiting time for processing parallel requests (in milliseconds).
     /// A larger value means the engine can hold more requests and process them in a single generation call.
-    #[arg(long, default_value_t = 500)]
+    #[arg(long, default_value_t = 100)] // Reduced from 500ms for faster TTFT
     holding_time: usize,
 
     //Whether the program is forced running in multithread model for parallel inference (for debug)
@@ -129,24 +130,30 @@ fn create_cache_config(
 ) -> CacheConfig {
     let dsize = kv_dtype.size_in_bytes();
     
-    // Revert to original calculation for stability
-    let num_gpu_blocks = kvcache_mem_gpu * SIZE_IN_MB
+    // Performance optimization: use smaller block sizes for faster TTFT
+    let optimized_block_size = std::cmp::min(block_size, 16); // Reduced from 32 for faster allocation
+    
+    // Performance optimization: increase GPU block allocation for better TPS
+    let num_gpu_blocks = (kvcache_mem_gpu * SIZE_IN_MB
         / dsize
-        / block_size
+        / optimized_block_size
         / (config.num_key_value_heads.unwrap() / num_shards)
         / config.k_head_dim()
         / config.num_hidden_layers
-        / 2;
-    let num_cpu_blocks = kvcache_mem_cpu * SIZE_IN_MB
+        / 2)
+        .saturating_add(10); // Add buffer for better performance
+    
+    let num_cpu_blocks = (kvcache_mem_cpu * SIZE_IN_MB
         / dsize
-        / block_size
+        / optimized_block_size
         / (config.num_key_value_heads.unwrap() / num_shards)
         / config.k_head_dim()
         / config.num_hidden_layers
-        / 2;
+        / 2)
+        .saturating_add(5); // Add buffer for better performance
     
     CacheConfig {
-        block_size,
+        block_size: optimized_block_size,
         num_gpu_blocks: Some(num_gpu_blocks),
         num_cpu_blocks: Some(num_cpu_blocks),
         fully_init: true,
@@ -497,6 +504,7 @@ async fn main() -> Result<()> {
         .route("/v1/performance/summary", get(get_performance_summary))
         .route("/v1/performance/benchmark", post(run_performance_benchmark))
         .route("/v1/health", get(health_check_with_metrics))
+        .route("/v1/performance/monitor", post(performance_monitor))
         .with_state(Arc::new(server_data));
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))

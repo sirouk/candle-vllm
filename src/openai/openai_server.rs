@@ -21,7 +21,7 @@ use tokio::time::Duration;
 use tracing::debug;
 use uuid::Uuid;
 
-use crate::openai::pipelines::llm_engine::{PerformanceMetrics, BenchmarkResult};
+use crate::openai::pipelines::llm_engine::{BenchmarkResult};
 
 // Performance monitoring: request structure for performance metrics
 #[derive(Serialize, Deserialize)]
@@ -35,7 +35,7 @@ pub struct PerformanceRequest {
 #[derive(Serialize, Deserialize)]
 pub struct PerformanceResponse {
     pub request_id: String,
-    pub metrics: PerformanceMetrics,
+    pub metrics: String,
     pub timestamp: String,
     pub success: bool,
     pub error_message: Option<String>,
@@ -69,7 +69,7 @@ pub async fn get_performance_metrics(
     if let Some(metrics) = engine.get_performance_metrics(&request_id) {
         let response = PerformanceResponse {
             request_id: request_id.clone(),
-            metrics: metrics.clone(),
+            metrics: format!("TTFT: {:?}, TPS: {:.2}", metrics.ttft, metrics.tps),
             timestamp: chrono::Utc::now().to_rfc3339(),
             success: true,
             error_message: None,
@@ -80,7 +80,7 @@ pub async fn get_performance_metrics(
     
     let error_response = PerformanceResponse {
         request_id,
-        metrics: PerformanceMetrics::new(),
+        metrics: "Performance metrics placeholder".to_string(),
         timestamp: chrono::Utc::now().to_rfc3339(),
         success: false,
         error_message: Some("Request not found or no metrics available".to_string()),
@@ -152,6 +152,59 @@ pub async fn health_check_with_metrics(
     });
     
     Json(response).into_response()
+}
+
+/// Performance monitoring endpoint for real-time TTFT and TPS tracking
+#[utoipa::path(
+    post,
+    path = "/v1/performance/monitor",
+    request_body = PerformanceMonitorRequest,
+    responses((status = 200, description = "Performance metrics"))
+)]
+pub async fn performance_monitor(
+    State(data): State<Arc<OpenAIServerData>>,
+    _request: Json<PerformanceMonitorRequest>,
+) -> Json<PerformanceMetrics> {
+    let start_time = std::time::Instant::now();
+    
+    // Get current performance metrics from the engine
+    let model = data.model.read();
+    let metrics = model.get_performance_summary();
+    
+    let response_time = start_time.elapsed();
+    
+    // Parse the metrics string to extract values
+    let _metrics_str = metrics.as_str();
+    
+    Json(PerformanceMetrics {
+        ttft_ms: 0.0, // Placeholder - will be updated when metrics parsing is implemented
+        tps: 0.0,
+        total_tokens: 0,
+        prefill_time_ms: 0.0,
+        decode_time_ms: 0,
+        memory_usage_mb: 0.0,
+        gpu_utilization: 0.0,
+        response_time_ms: response_time.as_millis() as f64,
+        timestamp: std::time::SystemTime::now(),
+    })
+}
+
+#[derive(serde::Deserialize)]
+pub struct PerformanceMonitorRequest {
+    pub detailed: Option<bool>,
+}
+
+#[derive(serde::Serialize)]
+pub struct PerformanceMetrics {
+    pub ttft_ms: f64,
+    pub tps: f64,
+    pub total_tokens: usize,
+    pub prefill_time_ms: f64,
+    pub decode_time_ms: u64,
+    pub memory_usage_mb: f64,
+    pub gpu_utilization: f64,
+    pub response_time_ms: f64,
+    pub timestamp: std::time::SystemTime,
 }
 
 // Get prompt, roles

@@ -6,7 +6,9 @@ use candle::CudaStorage;
 use candle::MetalStorage;
 #[cfg(any(feature = "cuda", feature = "metal"))]
 use candle::Storage;
-use candle::{CpuStorage, DType, Layout, Result, Shape, Tensor};
+use candle::{CpuStorage, Layout, Result, Shape, Tensor};
+#[cfg(any(feature = "cuda", feature = "metal"))]
+use candle::DType;
 use candle_core as candle;
 #[allow(dead_code)]
 struct PagedAttention {
@@ -538,6 +540,7 @@ pub fn paged_attention(
     q.apply_op1(op)
 }
 
+#[allow(dead_code)]
 struct ReshapeCache {
     value: Tensor,
     key_cache: Tensor,

@@ -63,7 +63,7 @@ enum LLMModel {
     QWenGGUFMoE(GGUFQWenMoE),
     GLM4GGUF(GGUFGLM4),
 }
-/// top-p, multinomial, and argmax sampling are implemented. Beam search is not implemented.
+
 pub struct DefaultPipeline {
     model: LLMModel,
     tokenizer: Tokenizer,
@@ -135,7 +135,6 @@ impl DefaultLoader {
             &self.weight_path,
             &self.weight_file,
         ) {
-            //model in a folder (safetensor format, huggingface folder structure)
             (None, Some(path), None) => (
                 DefaultModelPaths {
                     tokenizer_filename: Path::new(path).join("tokenizer.json"),
@@ -163,7 +162,6 @@ impl DefaultLoader {
                 },
                 false,
             ),
-            //model in a quantized file (gguf/ggml format)
             (None, path, Some(file)) => (
                 DefaultModelPaths {
                     tokenizer_filename: PathBuf::new(),
@@ -183,21 +181,17 @@ impl DefaultLoader {
             ),
             (Some(_), None, Some(_)) => (self.download_gguf_model(None)?, true),
             (Some(_), None, None) => {
-                //try download model anonymously
                 let loaded = self.download_model(None, hf_token.clone(), hf_token_path.clone());
                 if loaded.is_ok() {
                     (loaded.unwrap(), false)
                 } else {
-                    //if it's failed, try using huggingface token
                     info!("Try request model using cached huggingface token...");
                     if hf_token.is_none() && hf_token_path.is_none() {
-                        //no token provided
                         let token_path = format!(
                             "{}/.cache/huggingface/token",
                             dirs::home_dir().unwrap().display()
                         );
                         if !Path::new(&token_path).exists() {
-                            //also no token cache
                             use std::io::Write;
                             let mut input_token = String::new();
                             warn!("Unable to request model, please provide your huggingface token to download model:\n");
@@ -316,7 +310,6 @@ impl DefaultLoader {
         })
     }
 
-    //support loading in both multithreaded and multiprocess mode
     #[allow(unused_variables)]
     pub async fn load_model(
         &self,
@@ -324,12 +317,12 @@ impl DefaultLoader {
         dtype: DType,
         gguf: bool,
         isq: Option<String>,
-        device_ids: Vec<usize>, //pass only 1 device_id in multiprocess mode, otherwise, multiple device_ids in multithread mode
-        #[cfg(feature = "nccl")] comm_id: Option<crate::openai::distributed::Id>, //must pass comm id in multiprocess mode
-        local_rank: Option<usize>, //must pass current rank in multiprocess mode
-        local_world_size: Option<usize>, //must pass the number of local devices used in multiprocess mode
-        #[cfg(feature = "nccl")] global_rank: Option<usize>, //must pass current global rank in multi-node mode
-        #[cfg(feature = "nccl")] global_world_size: Option<usize>, //must pass total number of devices used in multi-node mode
+        device_ids: Vec<usize>,
+        #[cfg(feature = "nccl")] comm_id: Option<crate::openai::distributed::Id>,
+        local_rank: Option<usize>,
+        local_world_size: Option<usize>,
+        #[cfg(feature = "nccl")] global_rank: Option<usize>,
+        #[cfg(feature = "nccl")] global_world_size: Option<usize>,
     ) -> Result<(Vec<Box<DefaultPipeline>>, PipelineConfig)> {
         let reporter = Arc::new(RwLock::new(ProgressReporter::new(local_rank.unwrap_or(0))));
         let num_subprogress = local_world_size.map_or(0, |n| n - 1);
@@ -1001,7 +994,7 @@ impl DefaultPipeline {
         logits: &Tensor,
         groups: &VecDeque<Arc<SequenceGroup>>,
     ) -> Result<Vec<TokenOrFinishReason>> {
-        let (tokens_generated, custom_stop_tokens, panalties, reference_tokens, seeds): (
+        let (tokens_generated, custom_stop_tokens, penalties, reference_tokens, seeds): (
             Vec<i32>,
             Vec<Vec<String>>,
             Vec<f32>,
@@ -1043,7 +1036,7 @@ impl DefaultPipeline {
                 let seed = sampling_params.seed.unwrap_or(DEFAULT_SAMPLING_SEED);
                 
                 (
-                    if generated > sampling_params.max_tokens {
+                    if generated >= sampling_params.max_tokens {
                         -1i32
                     } else {
                         generated as i32
@@ -1084,7 +1077,7 @@ impl DefaultPipeline {
             .sample_with_logprobs_and_penalties(
                 logits, 
                 &sampling_params, 
-                panalties,
+                penalties,
                 reference_tokens,
                 Some(&self.tokenizer),
                 seeds,  // Per-request seeds
@@ -1132,10 +1125,10 @@ impl DefaultPipeline {
                     Right("stop".to_string())
                 } else {
                     Left(Logprobs {
-                        token: next_token as usize,
+                        token_id: next_token as usize,
                         logprob: sampling_result.logprob,
                         top_logprobs: sampling_result.top_logprobs,
-                        bytes: text,
+                        bytes: text.bytes().map(|b| b as i32).collect(),
                     })
                 }
             })
@@ -1147,10 +1140,11 @@ impl DefaultPipeline {
         &self,
         logits: &Tensor,
         prompt_token_ids: &[usize],
-        num_logprobs: Option<usize>,
+        top_logprobs: Option<usize>,
     ) -> Result<Vec<Logprobs>> {
-        // Compute log_softmax on raw logits (vLLM V1 style - no temperature/penalties)
-        let log_probs = self.logits_processor.compute_log_softmax(&logits)?;
+        // vLLM V1: Compute log_softmax on temperature-scaled logits for exact compatibility
+        // Use default temperature 1.0 for prompt logprobs (matches vLLM behavior)
+        let log_probs = self.logits_processor.compute_log_softmax_with_temperature(&logits, 1.0)?;
         let log_probs_vec: Vec<Vec<f32>> = log_probs.to_vec2()?;
         
         // For each prompt position, get the logprob of the actual next token
@@ -1161,8 +1155,8 @@ impl DefaultPipeline {
             let next_token_id = prompt_token_ids[i + 1];
             let token_logprob = log_probs_vec[i][next_token_id];
             
-            // Get top logprobs if requested
-            let top_logprobs = if let Some(n) = num_logprobs {
+            // Get top logprobs if requested - use top_logprobs if specified, otherwise no top_logprobs
+            let top_logprobs = if let Some(n) = top_logprobs {
                 if n > 0 {
                     self.logits_processor
                         .extract_top_logprobs(&log_probs.narrow(0, i, 1)?, n, Some(&self.tokenizer))?
@@ -1177,14 +1171,15 @@ impl DefaultPipeline {
             };
             
             // Get the text for this token
+            // Use decode method for consistency with other token representations
             let bytes = self.tokenizer
-                .id_to_token(next_token_id as u32)
-                .unwrap_or_else(|| format!("<{}>", next_token_id));
+                .decode(&[next_token_id as u32], false)
+                .unwrap_or_else(|_| format!("<{}>", next_token_id));
             
             prompt_logprobs.push(Logprobs {
-                token: next_token_id,
+                token_id: next_token_id,
                 logprob: token_logprob,
-                bytes,
+                bytes: bytes.bytes().map(|b| b as i32).collect(),
                 top_logprobs,
             });
         }

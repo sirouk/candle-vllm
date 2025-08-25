@@ -4,20 +4,112 @@ use std::ops::Range;
 
 const SAMPLING_EPS: f32 = 1e-5;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-// Top-n logprobs element
+#[derive(Debug, Clone)]
 pub struct TopLogprob {
-    pub token: usize,
+    pub token_id: usize,
     pub logprob: f32,
-    pub bytes: String,
+    pub bytes: Vec<i32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+pub struct ByteArray(pub Vec<u8>);
+
+impl serde::Serialize for ByteArray {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeSeq;
+        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+        for &byte in &self.0 {
+            seq.serialize_element(&byte)?;
+        }
+        seq.end()
+    }
+}
+
+impl serde::Serialize for TopLogprob {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("TopLogprob", 3)?;
+        let bytes_u8: Vec<u8> = self.bytes.iter().map(|&b| b as u8).collect();
+        let token_str = String::from_utf8_lossy(&bytes_u8);
+        state.serialize_field("token", &token_str)?;
+        state.serialize_field("logprob", &self.logprob)?;
+        state.serialize_field("bytes", &self.bytes)?;
+        state.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for TopLogprob {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        struct Helper {
+            token_id: usize,
+            logprob: f32,
+            bytes: String,
+        }
+        let helper = Helper::deserialize(deserializer)?;
+        Ok(TopLogprob {
+            token_id: helper.token_id,
+            logprob: helper.logprob,
+            bytes: helper.bytes.bytes().map(|b| b as i32).collect(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Logprobs {
-    pub token: usize,
+    pub token_id: usize,
     pub logprob: f32,
-    pub bytes: String,
+    pub bytes: Vec<i32>,
     pub top_logprobs: Vec<TopLogprob>,
+}
+
+impl serde::Serialize for Logprobs {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::ser::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("Logprobs", 4)?;
+        let bytes_u8: Vec<u8> = self.bytes.iter().map(|&b| b as u8).collect();
+        let token_str = String::from_utf8_lossy(&bytes_u8);
+        state.serialize_field("token", &token_str)?;
+        state.serialize_field("logprob", &self.logprob)?;
+        state.serialize_field("bytes", &self.bytes)?;
+        state.serialize_field("top_logprobs", &self.top_logprobs)?;
+        state.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Logprobs {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        struct Helper {
+            token_id: usize,
+            logprob: f32,
+            bytes: String,
+            #[serde(default)]
+            top_logprobs: Vec<TopLogprob>,
+        }
+        let helper = Helper::deserialize(deserializer)?;
+        Ok(Logprobs {
+            token_id: helper.token_id,
+            logprob: helper.logprob,
+            bytes: helper.bytes.bytes().map(|b| b as i32).collect(),
+            top_logprobs: helper.top_logprobs,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -87,6 +179,8 @@ pub struct SamplingParams {
     pub logprobs: Option<usize>,
     /// Num of log probs to return per prompt token.
     pub prompt_logprobs: Option<usize>,
+    /// Number of top logprobs to return per token. If specified, overrides the logprobs field.
+    pub top_logprobs: Option<usize>,
     /// Skip special toks in output.
     /// rec. default = true
     pub skip_special_tokens: bool,
@@ -118,6 +212,7 @@ impl SamplingParams {
         max_tokens: usize,
         logprobs: Option<usize>,
         prompt_logprobs: Option<usize>,
+        top_logprobs: Option<usize>,
         skip_special_tokens: bool,
         thinking: Option<bool>,
         seed: Option<u64>,
@@ -141,6 +236,7 @@ impl SamplingParams {
             max_tokens,
             logprobs,
             prompt_logprobs,
+            top_logprobs,
             skip_special_tokens,
             thinking,
             seed,

@@ -4,8 +4,7 @@ use dirs;
 use either::Either;
 use std::collections::HashMap;
 use std::{env, fs};
-/// The LLMEngine is effectively a wrapper around a ModulePipeline. It contains a Scheduler and a CacheEngine
-/// which are used to scheduler and manage the cache during generation requests, respectively.
+
 pub mod llm_engine;
 pub mod pipeline;
 type TokenOrFinishReason = Either<Logprobs, String>;

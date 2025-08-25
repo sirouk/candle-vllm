@@ -21,11 +21,11 @@ pub enum SequenceStatus {
 
 pub struct SequenceData {
     prompt_token_ids: Vec<usize>,
-    prompt_logprobs: Option<Vec<Logprobs>>, // Stores logprobs for prompt tokens
+    prompt_logprobs: Option<Vec<Logprobs>>,
     output_token_ids: Vec<Logprobs>,
     cumulative_logprob: f32,
     status: SequenceStatus,
-    num_cached_tokens: usize, //used for chunked prefill and context cache
+    num_cached_tokens: usize,
 }
 
 impl SequenceData {
@@ -62,8 +62,6 @@ impl SequenceData {
     }
 }
 
-/// A Sequence holds information about the data it contains (the tokens), and the logical token blocks
-/// to which it is mapped.
 pub struct _Sequence {
     data: RwLock<SequenceData>,
     seq_id: usize,
@@ -91,7 +89,6 @@ impl _Sequence {
     pub fn blocks_to_add_new_tok(&self) -> usize {
         let last = self.logical_token_blocks.last();
         if !last.is_some_and(|last| last.is_full() || last.is_empty()) {
-            // If we have space
             0
         } else {
             1
@@ -185,9 +182,8 @@ impl _Sequence {
     }
 
     #[must_use]
-    /// Clones the internal logprobs.
     pub fn get_output_tokens(&self) -> Vec<Logprobs> {
-        self.deref().output_token_ids.clone() // TODO(EricLBuehler): Better way to do this?
+        self.deref().output_token_ids.clone()
     }
 
     fn append_tokens_to_blocks(&mut self, tokens: Vec<usize>) {
@@ -265,8 +261,6 @@ impl Sequence {
 
 type SeqID = usize;
 
-/// A SequenceGroup holds the `n` (see SamplingParams) sequences generated from a single prompt.
-/// A SequenceGroup contains only sequences with the same prompt. They will always be scheduled together.
 pub struct SequenceGroup {
     seqs: HashMap<SeqID, Arc<Sequence>>,
     pub arrival_time: u64,
@@ -311,7 +305,6 @@ impl SequenceGroup {
         //     seq.deref_mut().deref().set_status(status.clone());
         // }
         for seq in self.seqs.values() {
-            // Lock each sequence individually and set the status
             if let Ok(seq_guard) = seq.0.write() {
                 seq_guard.deref_mut().set_status(status.clone());
             }
@@ -322,7 +315,6 @@ impl SequenceGroup {
         self.seqs.values().nth(0).unwrap().deref().get_status()
     }
 
-    /// Blocks to add one new token to each sequence
     pub fn total_blocks_to_add_new_tok(&self) -> usize {
         self.seqs
             .values()

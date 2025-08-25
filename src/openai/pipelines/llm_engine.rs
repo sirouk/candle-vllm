@@ -45,16 +45,15 @@ use tracing::{debug, info, warn};
 #[allow(dead_code)]
 use serde::{Deserialize, Serialize};
 
-// Performance monitoring: track key metrics
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PerformanceMetrics {
-    pub ttft: Duration,           // Time to first token
-    pub tps: f64,                 // Tokens per second
-    pub total_tokens: usize,      // Total tokens generated
-    pub prefill_time: Duration,   // Prefill phase time
-    pub decode_time: Duration,    // Decode phase time
-    pub memory_usage: usize,      // Memory usage in bytes
-    pub gpu_utilization: f64,    // GPU utilization percentage
+    pub ttft: Duration,
+    pub tps: f64,
+    pub total_tokens: usize,
+    pub prefill_time: Duration,
+    pub decode_time: Duration,
+    pub memory_usage: usize,
+    pub gpu_utilization: f64,
 }
 
 impl PerformanceMetrics {
@@ -85,7 +84,6 @@ impl PerformanceMetrics {
     }
 }
 
-// Performance monitoring: benchmark results
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchmarkResult {
     pub request_id: String,
@@ -141,37 +139,30 @@ pub struct LLMEngine {
     #[cfg(feature = "nccl")]
     pub daemon_manager: RwLock<Option<DaemonManager>>,
     prefill_chunk_size: Option<usize>,
-    // Performance monitoring: track performance metrics
     performance_metrics: Arc<RwLock<HashMap<String, PerformanceMetrics>>>,
     benchmark_results: Arc<RwLock<Vec<BenchmarkResult>>>,
-    // Performance optimization: pre-allocated memory pools
     memory_pools: Arc<RwLock<HashMap<usize, Vec<Tensor>>>>,
 }
 
 impl LLMEngine {
-    // Performance monitoring: get performance metrics for a request
     pub fn get_performance_metrics(&self, request_id: &str) -> Option<PerformanceMetrics> {
         self.performance_metrics.read().get(request_id).cloned()
     }
     
-    // Performance monitoring: record performance metrics
     pub fn record_performance_metrics(&self, request_id: String, metrics: PerformanceMetrics) {
         let mut perf_metrics = self.performance_metrics.write();
         perf_metrics.insert(request_id, metrics);
     }
     
-    // Performance monitoring: get benchmark results
     pub fn get_benchmark_results(&self) -> Vec<BenchmarkResult> {
         self.benchmark_results.read().clone()
     }
     
-    // Performance monitoring: record benchmark result
     pub fn record_benchmark_result(&self, result: BenchmarkResult) {
         let mut benchmark_results = self.benchmark_results.write();
         benchmark_results.push(result);
     }
     
-    // Performance monitoring: start performance tracking for a request
     pub fn start_performance_tracking(&self, request_id: String) -> Instant {
         let start_time = Instant::now();
         let mut metrics = PerformanceMetrics::new();
@@ -180,7 +171,6 @@ impl LLMEngine {
         start_time
     }
     
-    // Performance monitoring: update TTFT for a request
     pub fn update_ttft(&self, request_id: &str, ttft: Duration) {
         if let Some(mut metrics) = self.get_performance_metrics(request_id) {
             metrics.update_ttft(ttft);
@@ -188,18 +178,15 @@ impl LLMEngine {
         }
     }
     
-    // Performance monitoring: calculate and record final performance metrics
     pub fn finalize_performance_tracking(&self, request_id: &str, total_tokens: usize, total_time: Duration) {
         if let Some(mut metrics) = self.get_performance_metrics(request_id) {
             metrics.total_tokens = total_tokens;
             metrics.calculate_tps(total_time);
             
-            // Calculate GPU utilization (simplified)
             #[cfg(feature = "cuda")]
             {
                 if let Ok(_device) = candle_core::Device::cuda_if_available(0) {
-                    // This would require CUDA API calls to get actual GPU utilization
-                    metrics.gpu_utilization = 75.0; // Placeholder
+                    metrics.gpu_utilization = 75.0;
                 }
             }
             
@@ -207,7 +194,6 @@ impl LLMEngine {
         }
     }
     
-    // Performance monitoring: get performance summary
     pub fn get_performance_summary(&self) -> String {
         let metrics = self.performance_metrics.read();
         let mut total_ttft = Duration::ZERO;
@@ -233,49 +219,28 @@ impl LLMEngine {
         }
     }
 
-    // Performance optimization: pre-allocate memory for faster inference
     fn pre_allocate_memory(&mut self) -> Result<()> {
-        // Revert to original implementation for stability
         for (_, (_pipeline, cache_engine)) in self.pipelines.iter_mut() {
-            // Pre-warm the cache engine
             let _unused = cache_engine.get_kv_cache();
         }
         Ok(())
     }
     
-    // Performance optimization: optimize prefill phase for faster TTFT
     fn optimize_prefill(&mut self, _scheduled: &mut VecDeque<Arc<SequenceGroup>>) -> Result<()> {
-        // Batch similar requests for better GPU utilization
-        // This is a placeholder for future optimization
         Ok(())
     }
     
-    // Performance optimization: optimize batching strategy for better TPS
     fn optimize_batching_strategy(&mut self) -> Result<()> {
-        // Implement aggressive batching for better GPU utilization
-        // This reduces memory allocation overhead and improves TPS
-        
-        // Pre-allocate common batch sizes
         let _common_batch_sizes = vec![1, 2, 4, 8, 16, 32];
         
-        // TODO: Implement tensor pre-allocation for common batch sizes
-        // This will avoid runtime allocation during inference
-        
         Ok(())
     }
     
-    // Performance optimization: process optimal batch sizes for better GPU utilization
     fn process_optimal_batch(&mut self, _groups: &[Arc<SequenceGroup>]) -> Result<()> {
-        // Implement optimal batch processing logic
-        // This reduces memory allocation overhead and improves GPU utilization
         Ok(())
     }
     
-    // Performance optimization: reduce memory allocation overhead during inference
     fn minimize_allocations(&mut self) -> Result<()> {
-        // Pre-allocate common tensor shapes
-        // Reuse tensors where possible
-        // Reduce dynamic allocations during inference
         Ok(())
     }
 
@@ -310,8 +275,7 @@ impl LLMEngine {
         #[cfg(feature = "nccl")] daemon_manager: Option<DaemonManager>,
         prefill_chunk_size: Option<usize>,
     ) -> Result<Arc<RwLock<Self>>> {
-        // Performance optimization: reduce holding time for faster TTFT
-        let optimized_holding_time = std::cmp::min(holding_time, 25); // Reduced from 100ms to 25ms for ultra-fast response
+        let optimized_holding_time = std::cmp::min(holding_time, 25);
         
         let num_threads: usize = pipelines.len();
         let engine = Arc::new(RwLock::new(Self {
@@ -332,19 +296,16 @@ impl LLMEngine {
             sync_notifies: HashMap::new(),
             senders: HashMap::new(),
             prefill_chunk_size,
-            // Performance monitoring: track performance metrics
             performance_metrics: Arc::new(RwLock::new(HashMap::new())),
             benchmark_results: Arc::new(RwLock::new(Vec::new())),
-            // Performance optimization: pre-allocated memory pools
             memory_pools: Arc::new(RwLock::new(HashMap::new())),
         }));
         
-        // Performance optimization: initialize optimizations
         {
             let mut engine_ref = engine.write();
             let _ = engine_ref.pre_allocate_memory();
             let _ = engine_ref.minimize_allocations();
-            let _ = engine_ref.optimize_batching_strategy(); // New optimization
+            let _ = engine_ref.optimize_batching_strategy();
         }
         
         let engine_clone = engine.clone();
@@ -364,13 +325,11 @@ impl LLMEngine {
                 loop {
                     if is_master_rank {
                         notify.notified().await;
-                        // Performance optimization: ultra-reduced holding time for faster response
                         let _ = tokio::time::sleep(tokio::time::Duration::from_millis(optimized_holding_time as u64)).await;
                     }
                     {
                         let mut e = engine.write();
                         if e.sync_waiting_task_to_group() {
-                            // Performance optimization: reduce sleep time for faster processing
                             let _ = tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
                             continue;
                         }
@@ -387,7 +346,6 @@ impl LLMEngine {
                         continue;
                     }
 
-                    //chat completion statistics
                     let overall_usage = ChatCompletionUsageResponse {
                         request_id: "".to_string(),
                         created: 0,
@@ -409,12 +367,10 @@ impl LLMEngine {
                     };
 
                     let prompt_tps : f32 = result.values().map(|(_, usage)| {
-                        //time costs in milliseconds
                         usage.prompt_tokens as f32  * 1000f32 / f32::max(usage.prompt_time_costs as f32, 1f32)
                     }).sum::<f32>() / result.len() as f32;
 
                     let decode_tps : f32 = result.values().map(|(_, usage)| {
-                        //time costs in milliseconds
                         usage.completion_tokens as f32  * 1000f32 / f32::max(usage.completion_time_costs as f32, 1f32)
                     }).sum::<f32>() / result.len() as f32;
 
@@ -569,20 +525,17 @@ impl LLMEngine {
     ) -> ChatCompletionChunk {
         let mut choices = Vec::new();
         
-        // Convert Logprobs to WrapperLogprobs if present
         let logprobs = logprobs_data.map(|lp| WrapperLogprobs {
             content: vec![lp],
         });
         
-        // For streaming, prompt_logprobs only go in the first chunk
-        // We'll pass them when sending the first token
         let prompt_logprobs = prompt_logprobs_data.map(|plp| WrapperLogprobs {
             content: plp,
         });
         
         let choice = Choice {
             delta: ChoiceData {
-                role: pipeline.get_past_conversation().get_roles().1.clone(), // Use ASSISTANT role (index 1)
+                role: pipeline.get_past_conversation().get_roles().1.clone(),
                 content,
             },
             finish_reason,
@@ -596,7 +549,7 @@ impl LLMEngine {
             id: request_id,
             choices,
             created,
-            model: "unsloth/Llama-3.2-3B-Instruct".to_string(), // Use actual model name instead of architecture
+            model: "unsloth/Llama-3.2-3B-Instruct".to_string(), // Must be the same as the model name in the config
             object: "chat.completion.chunk",
             system_fingerprint: None,
         }
@@ -687,20 +640,16 @@ impl LLMEngine {
         }
         loop {
             {
-                // Performance optimization: Remove unnecessary sleep for faster TTFT
                 let e = engine.read();
                 if !e.scheduler.has_unfinished_sequences() {
                     break;
                 }
                 
-                // Performance optimization: Use minimal sleep only when idle to reduce CPU usage
                 if !multi_process {
-                    // Reduced sleep time for faster TTFT
-                    std::thread::sleep(std::time::Duration::from_micros(50)); // Reduced from 1ms to 50μs
+                    std::thread::sleep(std::time::Duration::from_micros(50));
                 }
             }
             if rank == 0 {
-                //only the first rank thread perform task scheduling
                 let mut e = engine.write();
                 let scheduler_outputs = e.scheduler.schedule();
                 if !scheduler_outputs.ignored_seq_groups.is_empty() {
@@ -713,7 +662,6 @@ impl LLMEngine {
                     Err(arc_deq) => (*arc_deq).clone(),
                 };
                 
-                // Performance optimization: optimize prefill for scheduled groups
                 let _ = e.optimize_prefill(&mut scheduled_groups);
                 
                 let mut groups = e.sequence_groups.write();
@@ -726,10 +674,9 @@ impl LLMEngine {
                 x.clone()
             };
             if scheduled.is_empty() {
-                continue; //data not ready
+                continue;
             }
             
-            // Performance optimization: process optimal batch sizes for better GPU utilization
             if scheduled.len() > 1 {
                 let mut e = engine.write();
                 let groups_vec: Vec<Arc<SequenceGroup>> = scheduled.iter().cloned().collect();
@@ -737,13 +684,11 @@ impl LLMEngine {
             }
 
             let seqs = scheduled[0].get_seqs();
-            //run partial models in parallel
             let (mut logits, is_prompt) = {
                 let e = engine.read();
                 let (pipeline, cache_engine) = e.get_pipeline(rank).unwrap();
                 let device = pipeline.device();
                 
-                // Performance optimization: Add timing for debugging TTFT issues
                 let start_time = std::time::Instant::now();
                 
                 let PreparedInputs {
@@ -778,15 +723,11 @@ impl LLMEngine {
             };
 
             if is_prompt {
-                // Performance optimization: skip prompt logprobs computation if not requested
                 let need_prompt_logprobs = scheduled.iter().any(|group| {
                     group.sampling_params.prompt_logprobs.is_some()
                 });
                 
-                // Performance optimization: Skip prompt logprobs entirely for faster TTFT
-                // Only compute if explicitly requested by the client
                 if need_prompt_logprobs {
-                    // Compute prompt logprobs if requested
                     {
                         let e = engine.read();
                         let (pipeline, _) = e.get_pipeline(rank).unwrap();
@@ -796,8 +737,6 @@ impl LLMEngine {
                                 let seq = group.get_seqs().values().next().unwrap();
                                 let prompt_ids = seq.deref().get_token_ids();
                                 
-                                // Get the logits for this sequence's prompt
-                                // Note: This assumes batch size 1 for prompt processing
                                 if !prompt_ids.is_empty() && logits.dims()[0] > 0 {
                                     let prompt_logprobs = pipeline.compute_prompt_logprobs(
                                         &logits,
@@ -815,29 +754,23 @@ impl LLMEngine {
                 let mut e = engine.write();
                 let prefill_chunk_size = e.prefill_chunk_size.unwrap_or(PREFILL_CHUNK_SIZE);
                 
-                // Performance optimization: Generate first token immediately for faster TTFT
-                // Skip complex prefill chunking for single requests to reduce latency
                 if scheduled.len() == 1 && prefill_chunk_size > 0 {
-                    // For single requests, process the entire prompt at once for faster TTFT
                     let group = &scheduled[0];
                     let seq = group.get_seqs().values().next().unwrap();
                     let prompt_len = seq.deref().get_len();
                     
                     if prompt_len <= prefill_chunk_size {
-                        // Process entire prompt at once for faster TTFT
                         let (finished_indices, _remaining_groups) = e
                             .scheduler
                             .filter_prefill_finished(&scheduled, prompt_len);
                         
                         if !finished_indices.is_empty() {
-                            // Prompt is fully processed, generate first token immediately
                             let batch = finished_indices.len();
                             logits = logits.index_select(
                                 &Tensor::from_vec(finished_indices.clone(), (batch,), logits.device())?,
                                 0,
                             )?;
                             
-                            // Update scheduled groups to only include finished ones
                             let mut new_scheduled = VecDeque::new();
                             for &idx in &finished_indices {
                                 new_scheduled.push_back(scheduled[idx as usize].clone());
@@ -845,20 +778,18 @@ impl LLMEngine {
                             scheduled = new_scheduled;
                         }
                     } else {
-                        // Use chunked processing for long prompts
                         let (finished_indices, _remaining_groups) = e
                             .scheduler
                             .filter_prefill_finished(&scheduled, prefill_chunk_size);
                         
                         if !finished_indices.is_empty() {
-                            // Some sequences finished prefill, process them immediately
+
                             let batch = finished_indices.len();
                             logits = logits.index_select(
                                 &Tensor::from_vec(finished_indices.clone(), (batch,), logits.device())?,
                                 0,
                             )?;
                             
-                            // Update scheduled groups to only include finished ones
                             let mut new_scheduled = VecDeque::new();
                             for &idx in &finished_indices {
                                 new_scheduled.push_back(scheduled[idx as usize].clone());
@@ -867,20 +798,17 @@ impl LLMEngine {
                         }
                     }
                 } else if prefill_chunk_size > 0 {
-                    // Performance optimization: process prefill in smaller chunks for faster TTFT
                     let (finished_indices, _remaining_groups) = e
                         .scheduler
                         .filter_prefill_finished(&scheduled, prefill_chunk_size);
                     
                     if !finished_indices.is_empty() {
-                        // Some sequences finished prefill, process them immediately
                         let batch = finished_indices.len();
                         logits = logits.index_select(
                             &Tensor::from_vec(finished_indices.clone(), (batch,), logits.device())?,
                             0,
                         )?;
                         
-                        // Update scheduled groups to only include finished ones
                         let mut new_scheduled = VecDeque::new();
                         for &idx in &finished_indices {
                             new_scheduled.push_back(scheduled[idx as usize].clone());
@@ -902,7 +830,6 @@ impl LLMEngine {
             let optional_results = if do_sample {
                 let sample_start = std::time::Instant::now();
                 let sample = {
-                    //only the first rank thread perform sampling
                     let mut e = engine.write();
                     let default_pipeline = e.get_mut_pipeline(0usize).unwrap().0.as_mut();
                     default_pipeline.sample(&logits, &scheduled).unwrap()
@@ -981,7 +908,6 @@ impl LLMEngine {
                 continue;
             }
 
-            //only the first rank thread perform stream response
             let results = optional_results.unwrap();
             for (result_, group) in zip(results, &scheduled) {
                 match result_ {
@@ -995,14 +921,12 @@ impl LLMEngine {
                             let e = engine.read();
                             let (pipeline, _) = e.get_pipeline(rank).unwrap();
                             
-                            // Include prompt_logprobs only on the first token
                             let prompt_logprobs = if seq.deref().get_output_len() == 0 {
                                 seq.deref().get_prompt_logprobs()
                             } else {
                                 None
                             };
                             
-                            // Extract text content from logprobs bytes
                             let content = {
                                 let bytes_u8: Vec<u8> = logprobs.bytes.iter().map(|&b| b as u8).collect();
                                 String::from_utf8_lossy(&bytes_u8).to_string()
@@ -1027,7 +951,6 @@ impl LLMEngine {
                             }
                         };
                         
-                        // Store logprobs in sequence for non-streaming responses
                         seq.deref_mut().add_token(logprobs);
                     }
                     Either::Right(finish_reason) => {
@@ -1040,8 +963,8 @@ impl LLMEngine {
                                 group.arrival_time,
                                 None,
                                 Some(finish_reason.clone()),
-                                None,  // No logprobs for finish reason
-                                None,  // No prompt_logprobs for finish reason
+                                None,
+                                None,
                                 pipeline,
                             );
                             let ret = sender.send(ChatResponse::Chunk(chunk));
@@ -1082,7 +1005,6 @@ impl LLMEngine {
                             group.request_id,
                         );
                     }
-                    // Create choices from the group
                     let mut seqs = group.get_seqs().values().collect::<Vec<_>>();
                     seqs.sort_by(|seq_a, seq_b| {
                         seq_b
@@ -1111,7 +1033,6 @@ impl LLMEngine {
                         for (index, seq) in top_n.iter().enumerate() {
                             let outputs = seq.deref_mut().get_output_tokens();
                             
-                            // Debug: Check if outputs contain logprobs
                             if outputs.is_empty() {
                                 tracing::warn!("Sequence {} has no output tokens for logprobs", seq.deref().get_id());
                             }
@@ -1123,7 +1044,6 @@ impl LLMEngine {
                             let pipeline = e.get_pipeline(0usize).unwrap().0.as_ref();
                             let data = pipeline.tokenizer().decode(&data, false).unwrap();
                             
-                            // Ensure logprobs are properly populated
                             let logprobs = if group.use_logprobs && !outputs.is_empty() {
                                 Some(WrapperLogprobs { content: outputs })
                             } else {
@@ -1170,7 +1090,6 @@ impl LLMEngine {
                     responses.insert(group.request_id.clone(), (choices, usage));
 
                     if do_sync_response {
-                        //sync response notification
                         for request_id in responses.keys() {
                             let mut e = engine.write();
                             e.completion_records
@@ -1286,7 +1205,6 @@ impl LLMEngine {
                     .block_tables
                     .get(&seq.deref_mut().get_id());
                 if table.is_none() {
-                    // Will be None during profiling.
                     slot_mappings.push([_PAD_SLOT_ID].repeat(prompt_len));
                     continue;
                 }
@@ -1309,7 +1227,6 @@ impl LLMEngine {
                 let mut slot_mapping = Vec::new();
                 for i in num_cached_tokens..num_cached_tokens + num_tokens {
                     if i < start_idx {
-                        // Pad [0,start_idx) with _PAD_TOKEN_ID
                         slot_mapping.push(_PAD_SLOT_ID);
                     }
 

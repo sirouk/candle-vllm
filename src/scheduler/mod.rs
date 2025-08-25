@@ -2,12 +2,7 @@
 //! primary method `schedule` returns the batched sequences as inputs, as well as the
 //! operations to be executed on the cache by the CacheEngine.
 
-/// The higher-level manager of the blocks allocated. Operations performed by the block engine do
-/// not directly change memory.
 pub mod block_engine;
-/// This is the lower-level manager of the cache. It manages swapping and copying the blocks and
-/// actually allocates the KV cache for the CPU and GPU. It is used by the LLMEngine to execute
-/// operations issued by the scheduler.
 pub mod cache_engine;
 pub mod sequence;
 use tracing::warn;
@@ -46,7 +41,6 @@ pub struct Scheduler {
     swapped_out: VecDeque<Arc<SequenceGroup>>,
     config: SchedulerConfig,
     pub block_engine: BlockEngine,
-    // Performance optimization: lock-free counters
     scheduling_counter: AtomicUsize,
     batch_counter: AtomicUsize,
 }
@@ -69,33 +63,26 @@ impl Scheduler {
         }
     }
 
-    // Performance optimization: faster sequence addition with reduced overhead
     pub fn add_sequence(&mut self, seq_group: SequenceGroup) {
-        // Pre-allocate capacity to avoid reallocations
         if self.waiting.len() >= self.waiting.capacity() {
             self.waiting.reserve(self.waiting.len() + 10);
         }
         self.waiting.push_back(Arc::new(seq_group));
     }
 
-    // Performance optimization: ultra-fast scheduling with minimal allocations
     pub fn schedule(&mut self) -> SchedulerOutput {
-        // Performance optimization: track scheduling operations
         self.scheduling_counter.fetch_add(1, Ordering::Relaxed);
         
-        // Fast path: if no swapped sequences, process waiting queue efficiently
         if self.swapped_out.is_empty() {
             let mut scheduled = VecDeque::with_capacity(self.waiting.len());
-            let mut ignored_seq_groups = VecDeque::with_capacity(4); // Small capacity for ignored groups
+            let mut ignored_seq_groups = VecDeque::with_capacity(4);
             
-            // Performance optimization: batch process sequences for better throughput
             let mut batch_size = 0;
-            let max_batch_size = std::cmp::min(self.waiting.len(), 8); // Process up to 8 sequences at once
+            let max_batch_size = std::cmp::min(self.waiting.len(), 8);
             
             while !self.waiting.is_empty() && batch_size < max_batch_size {
                 let seq_group = self.waiting.front().unwrap().clone();
 
-                // Fast capacity check with early exit
                 let current_running_count: usize = self.running
                     .iter()
                     .map(|group| group.get_seqs().len())
@@ -105,7 +92,6 @@ impl Scheduler {
                     break;
                 }
 
-                // Optimized allocation check with fast path
                 if seq_group.get_status() != SequenceStatus::Pending {
                     let can_allocate = self.block_engine.can_allocate(&seq_group);
                     match can_allocate {
@@ -122,7 +108,6 @@ impl Scheduler {
                         _ => {}
                     }
 
-                    // Performance optimization: batch allocation
                     self._allocate(&seq_group);
                 }
 
@@ -133,12 +118,10 @@ impl Scheduler {
                 batch_size += 1;
             }
             
-            // Performance optimization: track batch processing
             if batch_size > 1 {
                 self.batch_counter.fetch_add(1, Ordering::Relaxed);
             }
 
-            // Return early if we scheduled sequences
             if !scheduled.is_empty() || !ignored_seq_groups.is_empty() {
                 return SchedulerOutput {
                     scheduled: Arc::new(scheduled),
@@ -154,13 +137,6 @@ impl Scheduler {
         let mut blocks_to_swap_in = HashMap::new();
         let mut blocks_to_copy = HashMap::new();
 
-        // Reserve token slots for the running sequence groups, preempting the lowest (earliest) first.
-        // Preempt lowest priority sequences that are in the running queue, forming a
-        // new running queue that has the actually running sequences. Remember the preempted
-        // sequences, which will be put into the waiting or swapped out state depending on
-        // the preemption method (recompute or swap, respectively).
-
-        // Sorts by creation time, in descending order so that earliest are latest (first come first serve).
         self.sort_running_by_priority_fcfs();
 
         let mut running = VecDeque::new();
@@ -169,14 +145,11 @@ impl Scheduler {
             let seq_group = self.running.pop_front().unwrap();
             let mut finished_with_break = false;
             while !self.block_engine.can_append_token_to_seq(&seq_group) {
-                // If we cannot, now we need to preempt some seqs
                 if !self.running.is_empty() {
-                    // There is something to preempt.
                     let seq_to_preempt = self.running.pop_back().unwrap();
                     self._preempt(seq_to_preempt.clone(), &mut blocks_to_swap_out);
                     preempted.push_back(seq_to_preempt);
                 } else {
-                    // Nothing to preempt, preempt ourselves. Also, do not bother looking at anything else.
                     self._preempt(seq_group.clone(), &mut blocks_to_swap_out);
                     preempted.push_back(seq_group.clone());
                     finished_with_break = true;
@@ -184,34 +157,25 @@ impl Scheduler {
                 }
             }
             if !finished_with_break {
-                // If we need to, append physical blocks for a new token. We do not need to if there is enough space.
-                // If we just got preempted, there is no reason to allocate
                 self._append_token_slot_to_seq_group(&seq_group, &mut blocks_to_copy);
                 running.push_back(seq_group);
             }
         }
         self.running = running;
 
-        // Try to swap in the swapped out sequences and add these to the
-        // running state if possible.
-
-        // Sorts by creation time, in descending order so that earliest are latest (first come first serve).
         self.sort_swapped_out_by_priority_fcfs();
 
         if preempted.is_empty() {
             while !self.swapped_out.is_empty() {
                 let seq_group = self.swapped_out.front().unwrap();
 
-                // If the GPU cannot handle the group being swapped in, stop
                 if !self.block_engine.can_swap_in_seq_group(seq_group) {
                     break;
                 }
 
                 let seq_group = self.swapped_out.pop_front().unwrap();
-                // Swap in the blocks
                 let to_swap_in = self.block_engine.swap_in(&seq_group);
                 blocks_to_swap_in.extend(to_swap_in);
-                // Reserve a new slot
                 self._append_token_slot_to_seq_group(&seq_group, &mut blocks_to_copy);
                 self.running.push_back(seq_group);
             }
@@ -313,7 +277,6 @@ impl Scheduler {
         (finished_indices, finished_groups)
     }
 
-    // Performance optimization: get scheduling statistics for monitoring
     pub fn get_performance_stats(&self) -> (usize, usize) {
         (
             self.scheduling_counter.load(Ordering::Relaxed),
@@ -324,7 +287,6 @@ impl Scheduler {
 
 impl Scheduler {
     fn remove_seq_group(&mut self, seq_group: &SequenceGroup) {
-        // Remove it if it is in waiting
         if let Some(idx) = self
             .waiting
             .iter()
@@ -332,7 +294,6 @@ impl Scheduler {
         {
             self.waiting.remove(idx);
         };
-        // Remove it if it is in running
         if let Some(idx) = self
             .running
             .iter()
@@ -340,7 +301,6 @@ impl Scheduler {
         {
             self.running.remove(idx);
         };
-        // Remove it if it is in swapped out
         if let Some(idx) = self
             .swapped_out
             .iter()
@@ -374,7 +334,6 @@ impl Scheduler {
         self._free(seq_group);
     }
 
-    /// Preempt either by recomputation (for single sequence), or by swapping (for multiple).
     fn _preempt(
         &mut self,
         seq_group: Arc<SequenceGroup>,
@@ -398,7 +357,6 @@ impl Scheduler {
         blocks_to_swap_out: &mut HashMap<usize, usize>,
     ) {
         if !self.block_engine.can_swap_out_seq_group(&seq_group) {
-            // If we cannot swap it out, abort the sequence group.
             self._abort_seq_group(&seq_group);
             return;
         }

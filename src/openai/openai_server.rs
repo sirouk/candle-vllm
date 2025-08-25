@@ -23,7 +23,6 @@ use uuid::Uuid;
 
 use crate::openai::pipelines::llm_engine::{BenchmarkResult};
 
-// Performance monitoring: request structure for performance metrics
 #[derive(Serialize, Deserialize)]
 pub struct PerformanceRequest {
     pub request_id: Option<String>,
@@ -31,7 +30,6 @@ pub struct PerformanceRequest {
     pub include_gpu_util: Option<bool>,
 }
 
-// Performance monitoring: response structure for performance metrics
 #[derive(Serialize, Deserialize)]
 pub struct PerformanceResponse {
     pub request_id: String,
@@ -41,7 +39,6 @@ pub struct PerformanceResponse {
     pub error_message: Option<String>,
 }
 
-// Performance monitoring: benchmark request structure
 #[derive(Serialize, Deserialize)]
 pub struct BenchmarkRequest {
     pub num_requests: Option<usize>,
@@ -49,7 +46,6 @@ pub struct BenchmarkRequest {
     pub max_tokens: Option<usize>,
 }
 
-// Performance monitoring: benchmark response structure
 #[derive(Serialize, Deserialize)]
 pub struct BenchmarkResponse {
     pub results: Vec<BenchmarkResult>,
@@ -58,7 +54,6 @@ pub struct BenchmarkResponse {
     pub success_rate: f64,
 }
 
-// Performance monitoring: get performance metrics for a specific request
 pub async fn get_performance_metrics(
     State(state): State<Arc<OpenAIServerData>>,
     Json(request): Json<PerformanceRequest>,
@@ -89,7 +84,6 @@ pub async fn get_performance_metrics(
     (StatusCode::NOT_FOUND, Json(error_response)).into_response()
 }
 
-// Performance monitoring: get performance summary for all requests
 pub async fn get_performance_summary(
     State(state): State<Arc<OpenAIServerData>>,
 ) -> Response {
@@ -104,7 +98,6 @@ pub async fn get_performance_summary(
     Json(response).into_response()
 }
 
-// Performance monitoring: run performance benchmark
 pub async fn run_performance_benchmark(
     State(state): State<Arc<OpenAIServerData>>,
     Json(request): Json<BenchmarkRequest>,
@@ -114,10 +107,8 @@ pub async fn run_performance_benchmark(
     let _max_tokens = request.max_tokens.unwrap_or(50);
     
     let engine = state.model.write();
-    // Run benchmark (this would be implemented in the engine)
     let benchmark_id = format!("benchmark_{}", chrono::Utc::now().timestamp());
     
-    // For now, create a mock benchmark result
     let mock_result = BenchmarkResult::new(benchmark_id.clone());
     engine.record_benchmark_result(mock_result);
     
@@ -131,7 +122,6 @@ pub async fn run_performance_benchmark(
     Json(response).into_response()
 }
 
-// Performance monitoring: health check with performance metrics
 pub async fn health_check_with_metrics(
     State(state): State<Arc<OpenAIServerData>>,
 ) -> Response {
@@ -141,7 +131,6 @@ pub async fn health_check_with_metrics(
         "version": env!("CARGO_PKG_VERSION"),
     });
     
-    // Add performance metrics if available
     let engine = state.model.read();
     let summary = engine.get_performance_summary();
     let benchmark_count = engine.get_benchmark_results().len();
@@ -167,17 +156,15 @@ pub async fn performance_monitor(
 ) -> Json<PerformanceMetrics> {
     let start_time = std::time::Instant::now();
     
-    // Get current performance metrics from the engine
     let model = data.model.read();
     let metrics = model.get_performance_summary();
     
     let response_time = start_time.elapsed();
     
-    // Parse the metrics string to extract values
     let _metrics_str = metrics.as_str();
     
     Json(PerformanceMetrics {
-        ttft_ms: 0.0, // Placeholder - will be updated when metrics parsing is implemented
+        ttft_ms: 0.0,
         tps: 0.0,
         total_tokens: 0,
         prefill_time_ms: 0.0,
@@ -207,7 +194,6 @@ pub struct PerformanceMetrics {
     pub timestamp: std::time::SystemTime,
 }
 
-// Get prompt, roles
 async fn get_gen_prompt(
     data: &OpenAIServerData,
     request: &ChatCompletionRequest,
@@ -385,7 +371,7 @@ pub async fn chat_completions(
         request.ignore_eos.unwrap_or(false),
         max_request_tokens,
         request.logprobs.clone().into(),
-        None, // prompt_logprobs not supported in current API
+        None,
         request.top_logprobs.clone().into(),
         request.skip_special_tokens.unwrap_or(true),
         request.thinking,
@@ -412,7 +398,6 @@ pub async fn chat_completions(
     let _ = tokio::task::spawn_blocking(move || {
         tokio::runtime::Handle::current().block_on(async move {
             {
-                //send completion request to inference engine
                 let mut model = data.model.write();
                 model.add_request(
                     token_ids,
@@ -449,7 +434,6 @@ pub async fn chat_completions(
             ),
         )
     } else {
-        // wait until current response finished
         tracing::warn!("waiting response for sync request {}", request_id_clone);
         sync_notify.as_ref().notified().await;
         let model = data_clone.model.read();

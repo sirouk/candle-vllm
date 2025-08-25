@@ -30,41 +30,30 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Huggingface token environment variable (optional). If not specified, load using hf_token_path.
     #[arg(long)]
     hf_token: Option<String>,
 
-    /// Huggingface token file (optional). If neither `hf_token` or `hf_token_path` are specified this is used with the value
-    /// of `~/.cache/huggingface/token`
     #[arg(long)]
     hf_token_path: Option<String>,
 
-    /// Port to serve on (localhost:port)
     #[arg(long = "p", default_value_t = 2000)]
     port: u16,
 
-    /// Set verbose mode (print all requests)
     #[arg(long)]
     verbose: bool,
 
-    /// Maximum number of sequences to allow
     #[arg(long, default_value_t = 256)]
     max_num_seqs: usize,
 
-    /// Size of a block
     #[arg(long, default_value_t = 32)]
     block_size: usize,
 
-    /// if weight_path is passed, it will ignore the model_id
     #[arg(long = "m")]
     model_id: Option<String>,
 
-    /// The folder name that contains safetensor weights and json files
-    /// (same structure as huggingface online), path must include last "/"
     #[arg(long = "w")]
     weight_path: Option<String>,
 
-    /// The quantized weight file name (for gguf/ggml file)
     #[arg(long = "f")]
     weight_file: Option<String>,
 
@@ -77,27 +66,21 @@ struct Args {
     #[arg(long, default_value_t = false)]
     cpu: bool,
 
-    /// Available GPU memory for kvcache (MB)
     #[arg(long = "mem", default_value_t = 4096)]
     kvcache_mem_gpu: usize,
 
-    /// Available CPU memory for kvcache (MB)
     #[arg(long, default_value_t = 128)]
     kvcache_mem_cpu: usize,
 
-    /// Record conversation (default false, the client need to record chat history)
     #[arg(long)]
     record_conversation: bool,
 
     #[arg(long = "d", value_delimiter = ',')]
     device_ids: Option<Vec<usize>>,
 
-    /// Maximum waiting time for processing parallel requests (in milliseconds).
-    /// A larger value means the engine can hold more requests and process them in a single generation call.
-    #[arg(long, default_value_t = 25)] // Reduced from 100ms to 25ms for ultra-fast TTFT
+    #[arg(long, default_value_t = 25)]
     holding_time: usize,
 
-    //Whether the program is forced running in multithread model for parallel inference (for debug)
     #[arg(long, default_value_t = false)]
     multithread: bool,
 
@@ -130,10 +113,8 @@ fn create_cache_config(
 ) -> CacheConfig {
     let dsize = kv_dtype.size_in_bytes();
     
-    // Performance optimization: use ultra-small block sizes for fastest TTFT
-    let optimized_block_size = std::cmp::min(block_size, 8); // Reduced from 16 to 8 for fastest allocation
+    let optimized_block_size = std::cmp::min(block_size, 8);
     
-    // Performance optimization: increase GPU block allocation for better TPS
     let num_gpu_blocks = (kvcache_mem_gpu * SIZE_IN_MB
         / dsize
         / optimized_block_size
@@ -141,7 +122,7 @@ fn create_cache_config(
         / config.k_head_dim()
         / config.num_hidden_layers
         / 2)
-        .saturating_add(20); // Increased buffer for better performance
+        .saturating_add(20);
     
     let num_cpu_blocks = (kvcache_mem_cpu * SIZE_IN_MB
         / dsize
@@ -150,7 +131,7 @@ fn create_cache_config(
         / config.k_head_dim()
         / config.num_hidden_layers
         / 2)
-        .saturating_add(10); // Increased buffer for better performance
+        .saturating_add(10);
     
     CacheConfig {
         block_size: optimized_block_size,
@@ -308,7 +289,7 @@ async fn main() -> Result<()> {
         let (id, local_rank, global_rank, global_world_size, daemon_manager) =
             init_subprocess(device_ids.clone()).unwrap();
         if global_rank != 0 {
-            port = port + global_rank as u16; //processes other than rank 0 use fake server port since they do not perform response
+            port = port + global_rank as u16;
         }
         num_shards = global_world_size;
         let log_file = format!("candle-vllm-rank-{}.log", global_rank);
@@ -337,7 +318,7 @@ async fn main() -> Result<()> {
         )
     } else {
         use candle_vllm::openai::communicator::DaemonManager;
-        DaemonManager::set_master_rank(true); //master rank default for multithreaded mode
+        DaemonManager::set_master_rank(true);
         let log_file = format!("candle-vllm-{}ranks.log", device_ids.len());
         let _ = config_log(logger, args.log, log_file);
         (
@@ -400,7 +381,7 @@ async fn main() -> Result<()> {
             };
             let cache_cfg = create_cache_config(
                 args.kvcache_mem_gpu,
-                args.kvcache_mem_cpu, //dummy 512MB for cpu
+                args.kvcache_mem_cpu,
                 args.block_size,
                 &cfg,
                 kv_dtype,

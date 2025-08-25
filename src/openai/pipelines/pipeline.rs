@@ -63,7 +63,7 @@ enum LLMModel {
     QWenGGUFMoE(GGUFQWenMoE),
     GLM4GGUF(GGUFGLM4),
 }
-/// top-p, multinomial, and argmax sampling are implemented. Beam search is not implemented.
+
 pub struct DefaultPipeline {
     model: LLMModel,
     tokenizer: Tokenizer,
@@ -135,7 +135,6 @@ impl DefaultLoader {
             &self.weight_path,
             &self.weight_file,
         ) {
-            //model in a folder (safetensor format, huggingface folder structure)
             (None, Some(path), None) => (
                 DefaultModelPaths {
                     tokenizer_filename: Path::new(path).join("tokenizer.json"),
@@ -163,7 +162,6 @@ impl DefaultLoader {
                 },
                 false,
             ),
-            //model in a quantized file (gguf/ggml format)
             (None, path, Some(file)) => (
                 DefaultModelPaths {
                     tokenizer_filename: PathBuf::new(),
@@ -183,21 +181,17 @@ impl DefaultLoader {
             ),
             (Some(_), None, Some(_)) => (self.download_gguf_model(None)?, true),
             (Some(_), None, None) => {
-                //try download model anonymously
                 let loaded = self.download_model(None, hf_token.clone(), hf_token_path.clone());
                 if loaded.is_ok() {
                     (loaded.unwrap(), false)
                 } else {
-                    //if it's failed, try using huggingface token
                     info!("Try request model using cached huggingface token...");
                     if hf_token.is_none() && hf_token_path.is_none() {
-                        //no token provided
                         let token_path = format!(
                             "{}/.cache/huggingface/token",
                             dirs::home_dir().unwrap().display()
                         );
                         if !Path::new(&token_path).exists() {
-                            //also no token cache
                             use std::io::Write;
                             let mut input_token = String::new();
                             warn!("Unable to request model, please provide your huggingface token to download model:\n");
@@ -316,7 +310,6 @@ impl DefaultLoader {
         })
     }
 
-    //support loading in both multithreaded and multiprocess mode
     #[allow(unused_variables)]
     pub async fn load_model(
         &self,
@@ -324,12 +317,12 @@ impl DefaultLoader {
         dtype: DType,
         gguf: bool,
         isq: Option<String>,
-        device_ids: Vec<usize>, //pass only 1 device_id in multiprocess mode, otherwise, multiple device_ids in multithread mode
-        #[cfg(feature = "nccl")] comm_id: Option<crate::openai::distributed::Id>, //must pass comm id in multiprocess mode
-        local_rank: Option<usize>, //must pass current rank in multiprocess mode
-        local_world_size: Option<usize>, //must pass the number of local devices used in multiprocess mode
-        #[cfg(feature = "nccl")] global_rank: Option<usize>, //must pass current global rank in multi-node mode
-        #[cfg(feature = "nccl")] global_world_size: Option<usize>, //must pass total number of devices used in multi-node mode
+        device_ids: Vec<usize>,
+        #[cfg(feature = "nccl")] comm_id: Option<crate::openai::distributed::Id>,
+        local_rank: Option<usize>,
+        local_world_size: Option<usize>,
+        #[cfg(feature = "nccl")] global_rank: Option<usize>,
+        #[cfg(feature = "nccl")] global_world_size: Option<usize>,
     ) -> Result<(Vec<Box<DefaultPipeline>>, PipelineConfig)> {
         let reporter = Arc::new(RwLock::new(ProgressReporter::new(local_rank.unwrap_or(0))));
         let num_subprogress = local_world_size.map_or(0, |n| n - 1);

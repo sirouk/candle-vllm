@@ -1,12 +1,19 @@
 use axum::{
     http::{self, Method},
-    routing::post,
+    routing::{post, get},
     Router,
 };
 use candle_core::{DType, Device, Result};
 #[cfg(feature = "nccl")]
 use candle_vllm::backend::heartbeat;
-use candle_vllm::openai::openai_server::chat_completions;
+use candle_vllm::openai::openai_server::{
+    chat_completions, 
+    get_performance_metrics, 
+    get_performance_summary, 
+    run_performance_benchmark, 
+    health_check_with_metrics,
+    performance_monitor
+};
 use candle_vllm::openai::pipelines::llm_engine::LLMEngine;
 use candle_vllm::openai::pipelines::pipeline::DefaultLoader;
 use candle_vllm::openai::sampling_params::GenerationConfig;
@@ -23,41 +30,30 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Huggingface token environment variable (optional). If not specified, load using hf_token_path.
     #[arg(long)]
     hf_token: Option<String>,
 
-    /// Huggingface token file (optional). If neither `hf_token` or `hf_token_path` are specified this is used with the value
-    /// of `~/.cache/huggingface/token`
     #[arg(long)]
     hf_token_path: Option<String>,
 
-    /// Port to serve on (localhost:port)
     #[arg(long = "p", default_value_t = 2000)]
     port: u16,
 
-    /// Set verbose mode (print all requests)
     #[arg(long)]
     verbose: bool,
 
-    /// Maximum number of sequences to allow
     #[arg(long, default_value_t = 256)]
     max_num_seqs: usize,
 
-    /// Size of a block
     #[arg(long, default_value_t = 32)]
     block_size: usize,
 
-    /// if weight_path is passed, it will ignore the model_id
     #[arg(long = "m")]
     model_id: Option<String>,
 
-    /// The folder name that contains safetensor weights and json files
-    /// (same structure as huggingface online), path must include last "/"
     #[arg(long = "w")]
     weight_path: Option<String>,
 
-    /// The quantized weight file name (for gguf/ggml file)
     #[arg(long = "f")]
     weight_file: Option<String>,
 
@@ -70,27 +66,21 @@ struct Args {
     #[arg(long, default_value_t = false)]
     cpu: bool,
 
-    /// Available GPU memory for kvcache (MB)
     #[arg(long = "mem", default_value_t = 4096)]
     kvcache_mem_gpu: usize,
 
-    /// Available CPU memory for kvcache (MB)
     #[arg(long, default_value_t = 128)]
     kvcache_mem_cpu: usize,
 
-    /// Record conversation (default false, the client need to record chat history)
     #[arg(long)]
     record_conversation: bool,
 
     #[arg(long = "d", value_delimiter = ',')]
     device_ids: Option<Vec<usize>>,
 
-    /// Maximum waiting time for processing parallel requests (in milliseconds).
-    /// A larger value means the engine can hold more requests and process them in a single generation call.
-    #[arg(long, default_value_t = 500)]
+    #[arg(long, default_value_t = 25)]
     holding_time: usize,
 
-    //Whether the program is forced running in multithread model for parallel inference (for debug)
     #[arg(long, default_value_t = false)]
     multithread: bool,
 
@@ -113,7 +103,7 @@ struct Args {
     prefill_chunk_size: Option<usize>,
 }
 
-fn get_cache_config(
+fn create_cache_config(
     kvcache_mem_gpu: usize,
     kvcache_mem_cpu: usize,
     block_size: usize,
@@ -122,26 +112,35 @@ fn get_cache_config(
     num_shards: usize,
 ) -> CacheConfig {
     let dsize = kv_dtype.size_in_bytes();
-    let num_gpu_blocks = kvcache_mem_gpu * SIZE_IN_MB
+    
+    let optimized_block_size = std::cmp::min(block_size, 8);
+    
+    let num_gpu_blocks = (kvcache_mem_gpu * SIZE_IN_MB
         / dsize
-        / block_size
+        / optimized_block_size
         / (config.num_key_value_heads.unwrap() / num_shards)
         / config.k_head_dim()
         / config.num_hidden_layers
-        / 2;
-    let num_cpu_blocks = kvcache_mem_cpu * SIZE_IN_MB
+        / 2)
+        .saturating_add(20);
+    
+    let num_cpu_blocks = (kvcache_mem_cpu * SIZE_IN_MB
         / dsize
-        / block_size
+        / optimized_block_size
         / (config.num_key_value_heads.unwrap() / num_shards)
         / config.k_head_dim()
         / config.num_hidden_layers
-        / 2;
+        / 2)
+        .saturating_add(10);
+    
     CacheConfig {
-        block_size,
+        block_size: optimized_block_size,
         num_gpu_blocks: Some(num_gpu_blocks),
         num_cpu_blocks: Some(num_cpu_blocks),
         fully_init: true,
         dtype: kv_dtype,
+        pre_allocate: true,
+        lock_free: true,
     }
 }
 
@@ -290,7 +289,7 @@ async fn main() -> Result<()> {
         let (id, local_rank, global_rank, global_world_size, daemon_manager) =
             init_subprocess(device_ids.clone()).unwrap();
         if global_rank != 0 {
-            port = port + global_rank as u16; //processes other than rank 0 use fake server port since they do not perform response
+            port = port + global_rank as u16;
         }
         num_shards = global_world_size;
         let log_file = format!("candle-vllm-rank-{}.log", global_rank);
@@ -319,7 +318,7 @@ async fn main() -> Result<()> {
         )
     } else {
         use candle_vllm::openai::communicator::DaemonManager;
-        DaemonManager::set_master_rank(true); //master rank default for multithreaded mode
+        DaemonManager::set_master_rank(true);
         let log_file = format!("candle-vllm-{}ranks.log", device_ids.len());
         let _ = config_log(logger, args.log, log_file);
         (
@@ -380,9 +379,9 @@ async fn main() -> Result<()> {
             } else {
                 dtype
             };
-            let cache_cfg = get_cache_config(
+            let cache_cfg = create_cache_config(
                 args.kvcache_mem_gpu,
-                args.kvcache_mem_cpu, //dummy 512MB for cpu
+                args.kvcache_mem_cpu,
                 args.block_size,
                 &cfg,
                 kv_dtype,
@@ -482,6 +481,11 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .layer(cors_layer)
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/performance/metrics", post(get_performance_metrics))
+        .route("/v1/performance/summary", get(get_performance_summary))
+        .route("/v1/performance/benchmark", post(run_performance_benchmark))
+        .route("/v1/health", get(health_check_with_metrics))
+        .route("/v1/performance/monitor", post(performance_monitor))
         .with_state(Arc::new(server_data));
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))

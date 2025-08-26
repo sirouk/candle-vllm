@@ -83,7 +83,6 @@ struct GPUAllocator;
 struct CPUAllocator;
 
 struct GPUAllocatorWrapper(usize);
-// struct CPUAllocatorWrapper(usize);
 
 impl Deref for GPUAllocatorWrapper {
     type Target = usize;
@@ -179,10 +178,6 @@ pub enum AllocStatus {
 
 type SeqID = usize;
 
-/// A BlockEngine maps each Sequence (identified by its SeqID), to physical token blocks.
-/// The physical token blocks may not match the logical token blocks because during
-/// scheduling, physical blocks are allocated to accommodate the new tokens generated.
-/// These new tokens will be added to the logical token block for each sequence.
 pub struct BlockEngine {
     num_gpu_blocks: usize,
     gpu_allocator: Allocator<GPUAllocator>,
@@ -236,7 +231,6 @@ impl BlockEngine {
 
     pub fn can_append_token_to_seq(&self, seq_group: &SequenceGroup) -> bool {
         let free_blocks = self.gpu_allocator.get_num_free_blocks();
-        // Physical blocks = logical blocks
         seq_group.total_blocks_to_add_new_tok() <= *free_blocks
     }
 
@@ -246,7 +240,6 @@ impl BlockEngine {
             .get(&sequence.deref_mut().get_id())
             .unwrap();
 
-        // Free from block table
         for block in block_table {
             if block.deref_mut().is_gpu {
                 self.gpu_allocator.free_block(block.clone())
@@ -268,10 +261,7 @@ impl BlockEngine {
         blocks_required <= self.cpu_allocator.free_blocks.len()
     }
 
-    /// Update the block table so that the sequence does no longer reserve any GPU
-    /// physical blocks, and only has CPU physical blocks.
     pub fn swap_out(&mut self, seq_group: &SequenceGroup) -> HashMap<usize, usize> {
-        // GPU block to a CPU block
         let mut new_mapping = HashMap::new();
         for seq_id in seq_group.get_seqs().keys() {
             let mut new_block_table = VecDeque::new();
@@ -280,12 +270,10 @@ impl BlockEngine {
             for gpu_block in block_table {
                 let cpu_block =
                     if let Entry::Vacant(e) = new_mapping.entry(gpu_block.deref_mut().block_id) {
-                        // Create a new block
                         let cpu_block = self.cpu_allocator.allocate();
                         e.insert(cpu_block.clone());
                         cpu_block
                     } else {
-                        // Reuse a block
                         let cpu_block = new_mapping
                             .get(&gpu_block.deref_mut().block_id)
                             .unwrap()
@@ -305,8 +293,6 @@ impl BlockEngine {
             .collect::<HashMap<_, _>>()
     }
 
-    // Returns the COW mapping (src, dst).
-    // COW is performed if there are multiple references to the last physical block.
     pub fn append_token_slot_to_seq(&mut self, sequence: &Sequence) -> Option<(usize, usize)> {
         let table = self
             .block_tables
@@ -324,7 +310,6 @@ impl BlockEngine {
                 if last_block.deref_mut().refcount == 1 {
                     None
                 } else {
-                    // We would be writing into shared, so COW.
                     let new_block = self.gpu_allocator.allocate();
                     self.gpu_allocator.free_block(last_block.clone());
                     let old_number = last_block.deref_mut().block_id;
@@ -349,10 +334,7 @@ impl BlockEngine {
         blocks_required <= self.gpu_allocator.free_blocks.len()
     }
 
-    /// Update the block table so that the sequence does no longer reserve any CPU
-    /// physical blocks, and only has GPU physical blocks.
     pub fn swap_in(&mut self, seq_group: &SequenceGroup) -> HashMap<usize, usize> {
-        // CPU block to a GPU block
         let mut new_mapping = HashMap::new();
         for seq_id in seq_group.get_seqs().keys() {
             let mut new_block_table = VecDeque::new();
@@ -361,12 +343,10 @@ impl BlockEngine {
             for cpu_block in block_table {
                 let gpu_block =
                     if let Entry::Vacant(e) = new_mapping.entry(cpu_block.deref_mut().block_id) {
-                        // Create a new block
                         let gpu_block = self.cpu_allocator.allocate();
                         e.insert(gpu_block.clone());
                         gpu_block
                     } else {
-                        // Reuse a block
                         let gpu_block = new_mapping
                             .get(&cpu_block.deref_mut().block_id)
                             .unwrap()

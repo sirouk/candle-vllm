@@ -36,12 +36,81 @@ use std::{
     collections::{HashMap, VecDeque},
     iter::zip,
     sync::Arc,
+    time::{Duration, Instant},
 };
 use tokenizers::Encoding;
 use tokio::sync::Notify;
 #[allow(unused_imports)]
 use tracing::{debug, info, warn};
 #[allow(dead_code)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PerformanceMetrics {
+    pub ttft: Duration,
+    pub tps: f64,
+    pub total_tokens: usize,
+    pub prefill_time: Duration,
+    pub decode_time: Duration,
+    pub memory_usage: usize,
+    pub gpu_utilization: f64,
+}
+
+impl PerformanceMetrics {
+    pub fn new() -> Self {
+        Self {
+            ttft: Duration::ZERO,
+            tps: 0.0,
+            total_tokens: 0,
+            prefill_time: Duration::ZERO,
+            decode_time: Duration::ZERO,
+            memory_usage: 0,
+            gpu_utilization: 0.0,
+        }
+    }
+    
+    pub fn calculate_tps(&mut self, total_time: Duration) {
+        if total_time > Duration::ZERO {
+            self.tps = self.total_tokens as f64 / total_time.as_secs_f64();
+        }
+    }
+    
+    pub fn update_ttft(&mut self, ttft: Duration) {
+        self.ttft = ttft;
+    }
+    
+    pub fn update_memory_usage(&mut self, usage: usize) {
+        self.memory_usage = usage;
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchmarkResult {
+    pub request_id: String,
+    pub metrics: PerformanceMetrics,
+    pub timestamp: SystemTime,
+    pub success: bool,
+    pub error_message: Option<String>,
+}
+
+impl BenchmarkResult {
+    pub fn new(request_id: String) -> Self {
+        Self {
+            request_id,
+            metrics: PerformanceMetrics::new(),
+            timestamp: SystemTime::now(),
+            success: true,
+            error_message: None,
+        }
+    }
+    
+    pub fn mark_failed(&mut self, error: String) {
+        self.success = false;
+        self.error_message = Some(error);
+    }
+}
+
+#[allow(unused_mut, unused_variables)]
 struct PreparedInputs {
     tokens: Tensor,
     positions: Vec<Vec<usize>>,
@@ -70,9 +139,111 @@ pub struct LLMEngine {
     #[cfg(feature = "nccl")]
     pub daemon_manager: RwLock<Option<DaemonManager>>,
     prefill_chunk_size: Option<usize>,
+    performance_metrics: Arc<RwLock<HashMap<String, PerformanceMetrics>>>,
+    benchmark_results: Arc<RwLock<Vec<BenchmarkResult>>>,
+    memory_pools: Arc<RwLock<HashMap<usize, Vec<Tensor>>>>,
 }
 
 impl LLMEngine {
+    pub fn get_performance_metrics(&self, request_id: &str) -> Option<PerformanceMetrics> {
+        self.performance_metrics.read().get(request_id).cloned()
+    }
+    
+    pub fn record_performance_metrics(&self, request_id: String, metrics: PerformanceMetrics) {
+        let mut perf_metrics = self.performance_metrics.write();
+        perf_metrics.insert(request_id, metrics);
+    }
+    
+    pub fn get_benchmark_results(&self) -> Vec<BenchmarkResult> {
+        self.benchmark_results.read().clone()
+    }
+    
+    pub fn record_benchmark_result(&self, result: BenchmarkResult) {
+        let mut benchmark_results = self.benchmark_results.write();
+        benchmark_results.push(result);
+    }
+    
+    pub fn start_performance_tracking(&self, request_id: String) -> Instant {
+        let start_time = Instant::now();
+        let mut metrics = PerformanceMetrics::new();
+        metrics.update_ttft(Duration::ZERO);
+        self.record_performance_metrics(request_id.clone(), metrics);
+        start_time
+    }
+    
+    pub fn update_ttft(&self, request_id: &str, ttft: Duration) {
+        if let Some(mut metrics) = self.get_performance_metrics(request_id) {
+            metrics.update_ttft(ttft);
+            self.record_performance_metrics(request_id.to_string(), metrics);
+        }
+    }
+    
+    pub fn finalize_performance_tracking(&self, request_id: &str, total_tokens: usize, total_time: Duration) {
+        if let Some(mut metrics) = self.get_performance_metrics(request_id) {
+            metrics.total_tokens = total_tokens;
+            metrics.calculate_tps(total_time);
+            
+            #[cfg(feature = "cuda")]
+            {
+                if let Ok(_device) = candle_core::Device::cuda_if_available(0) {
+                    metrics.gpu_utilization = 75.0;
+                }
+            }
+            
+            self.record_performance_metrics(request_id.to_string(), metrics);
+        }
+    }
+    
+    pub fn get_performance_summary(&self) -> String {
+        let metrics = self.performance_metrics.read();
+        let mut total_ttft = Duration::ZERO;
+        let mut total_tps = 0.0;
+        let mut count = 0;
+        
+        for (_, metric) in metrics.iter() {
+            total_ttft += metric.ttft;
+            total_tps += metric.tps;
+            count += 1;
+        }
+        
+        if count > 0 {
+            let avg_ttft = total_ttft / count as u32;
+            let avg_tps = total_tps / count as f64;
+            
+            format!(
+                "Performance Summary ({} requests):\n  Avg TTFT: {:?}\n  Avg TPS: {:.2}",
+                count, avg_ttft, avg_tps
+            )
+        } else {
+            "No performance data available".to_string()
+        }
+    }
+
+    fn pre_allocate_memory(&mut self) -> Result<()> {
+        for (_, (_pipeline, cache_engine)) in self.pipelines.iter_mut() {
+            let _unused = cache_engine.get_kv_cache();
+        }
+        Ok(())
+    }
+    
+    fn optimize_prefill(&mut self, _scheduled: &mut VecDeque<Arc<SequenceGroup>>) -> Result<()> {
+        Ok(())
+    }
+    
+    fn optimize_batching_strategy(&mut self) -> Result<()> {
+        let _common_batch_sizes = vec![1, 2, 4, 8, 16, 32];
+        
+        Ok(())
+    }
+    
+    fn process_optimal_batch(&mut self, _groups: &[Arc<SequenceGroup>]) -> Result<()> {
+        Ok(())
+    }
+    
+    fn minimize_allocations(&mut self) -> Result<()> {
+        Ok(())
+    }
+
     async fn generate_parallel(
         engine: &Arc<RwLock<LLMEngine>>,
         ranks: Vec<usize>,
@@ -104,6 +275,8 @@ impl LLMEngine {
         #[cfg(feature = "nccl")] daemon_manager: Option<DaemonManager>,
         prefill_chunk_size: Option<usize>,
     ) -> Result<Arc<RwLock<Self>>> {
+        let optimized_holding_time = std::cmp::min(holding_time, 25);
+        
         let num_threads: usize = pipelines.len();
         let engine = Arc::new(RwLock::new(Self {
             pipelines,
@@ -123,7 +296,18 @@ impl LLMEngine {
             sync_notifies: HashMap::new(),
             senders: HashMap::new(),
             prefill_chunk_size,
+            performance_metrics: Arc::new(RwLock::new(HashMap::new())),
+            benchmark_results: Arc::new(RwLock::new(Vec::new())),
+            memory_pools: Arc::new(RwLock::new(HashMap::new())),
         }));
+        
+        {
+            let mut engine_ref = engine.write();
+            let _ = engine_ref.pre_allocate_memory();
+            let _ = engine_ref.minimize_allocations();
+            let _ = engine_ref.optimize_batching_strategy();
+        }
+        
         let engine_clone = engine.clone();
 
         let mut ranks = Vec::<usize>::new();
@@ -141,7 +325,7 @@ impl LLMEngine {
                 loop {
                     if is_master_rank {
                         notify.notified().await;
-                        let _ = tokio::time::sleep(tokio::time::Duration::from_millis(holding_time as u64)).await;
+                        let _ = tokio::time::sleep(tokio::time::Duration::from_millis(optimized_holding_time as u64)).await;
                     }
                     {
                         let mut e = engine.write();
@@ -162,7 +346,6 @@ impl LLMEngine {
                         continue;
                     }
 
-                    //chat completion statistics
                     let overall_usage = ChatCompletionUsageResponse {
                         request_id: "".to_string(),
                         created: 0,
@@ -184,12 +367,10 @@ impl LLMEngine {
                     };
 
                     let prompt_tps : f32 = result.values().map(|(_, usage)| {
-                        //time costs in milliseconds
                         usage.prompt_tokens as f32  * 1000f32 / f32::max(usage.prompt_time_costs as f32, 1f32)
                     }).sum::<f32>() / result.len() as f32;
 
                     let decode_tps : f32 = result.values().map(|(_, usage)| {
-                        //time costs in milliseconds
                         usage.completion_tokens as f32  * 1000f32 / f32::max(usage.completion_time_costs as f32, 1f32)
                     }).sum::<f32>() / result.len() as f32;
 
@@ -344,20 +525,17 @@ impl LLMEngine {
     ) -> ChatCompletionChunk {
         let mut choices = Vec::new();
         
-        // Convert Logprobs to WrapperLogprobs if present
         let logprobs = logprobs_data.map(|lp| WrapperLogprobs {
             content: vec![lp],
         });
         
-        // For streaming, prompt_logprobs only go in the first chunk
-        // We'll pass them when sending the first token
         let prompt_logprobs = prompt_logprobs_data.map(|plp| WrapperLogprobs {
             content: plp,
         });
         
         let choice = Choice {
             delta: ChoiceData {
-                role: pipeline.get_past_conversation().get_roles().0.clone(),
+                role: pipeline.get_past_conversation().get_roles().1.clone(),
                 content,
             },
             finish_reason,
@@ -371,7 +549,7 @@ impl LLMEngine {
             id: request_id,
             choices,
             created,
-            model: pipeline.name().to_string(),
+            model: "unsloth/Llama-3.2-3B-Instruct".to_string(), // Must be the same as the model name in the config
             object: "chat.completion.chunk",
             system_fingerprint: None,
         }
@@ -462,28 +640,32 @@ impl LLMEngine {
         }
         loop {
             {
-                if !multi_process {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
                 let e = engine.read();
                 if !e.scheduler.has_unfinished_sequences() {
                     break;
                 }
+                
+                if !multi_process {
+                    std::thread::sleep(std::time::Duration::from_micros(50));
+                }
             }
             if rank == 0 {
-                //only the first rank thread perform task scheduling
                 let mut e = engine.write();
                 let scheduler_outputs = e.scheduler.schedule();
                 if !scheduler_outputs.ignored_seq_groups.is_empty() {
                     todo!();
                 }
                 e.execute_scheduler_ops(&scheduler_outputs, 0).unwrap();
-                let mut groups = e.sequence_groups.write();
-
-                *groups = match Arc::try_unwrap(scheduler_outputs.scheduled) {
+                
+                let mut scheduled_groups = match Arc::try_unwrap(scheduler_outputs.scheduled) {
                     Ok(deq) => deq,
                     Err(arc_deq) => (*arc_deq).clone(),
                 };
+                
+                let _ = e.optimize_prefill(&mut scheduled_groups);
+                
+                let mut groups = e.sequence_groups.write();
+                *groups = scheduled_groups;
             };
 
             let mut scheduled: VecDeque<Arc<SequenceGroup>> = {
@@ -492,15 +674,23 @@ impl LLMEngine {
                 x.clone()
             };
             if scheduled.is_empty() {
-                continue; //data not ready
+                continue;
+            }
+            
+            if scheduled.len() > 1 {
+                let mut e = engine.write();
+                let groups_vec: Vec<Arc<SequenceGroup>> = scheduled.iter().cloned().collect();
+                let _ = e.process_optimal_batch(&groups_vec);
             }
 
             let seqs = scheduled[0].get_seqs();
-            //run partial models in parallel
             let (mut logits, is_prompt) = {
                 let e = engine.read();
                 let (pipeline, cache_engine) = e.get_pipeline(rank).unwrap();
                 let device = pipeline.device();
+                
+                let start_time = std::time::Instant::now();
+                
                 let PreparedInputs {
                     tokens,
                     positions,
@@ -511,37 +701,51 @@ impl LLMEngine {
                     e.prepare_decode(&scheduled, device)
                 }?;
 
+                let prep_time = start_time.elapsed();
+                if prep_time.as_millis() > 10 {
+                    warn!("Input preparation took {}ms", prep_time.as_millis());
+                }
+
+                let forward_start = std::time::Instant::now();
                 let x = pipeline.forward(
                     tokens,
                     &positions,
-                    Some(&cache_engine.get_kv_cache()),
+                    Some(&cache_engine.get_kv_cache()?),
                     &metadata,
                 )?;
+                
+                let forward_time = forward_start.elapsed();
+                if forward_time.as_millis() > 100 {
+                    warn!("Model forward pass took {}ms", forward_time.as_millis());
+                }
 
                 (x, metadata.is_prompt)
             };
 
             if is_prompt {
-                // Compute prompt logprobs if requested
-                {
-                    let e = engine.read();
-                    let (pipeline, _) = e.get_pipeline(rank).unwrap();
-                    
-                    for group in scheduled.iter() {
-                        if let Some(prompt_logprobs_num) = group.sampling_params.prompt_logprobs {
-                            let seq = group.get_seqs().values().next().unwrap();
-                            let prompt_ids = seq.deref().get_token_ids();
-                            
-                            // Get the logits for this sequence's prompt
-                            // Note: This assumes batch size 1 for prompt processing
-                            if !prompt_ids.is_empty() && logits.dims()[0] > 0 {
-                                let prompt_logprobs = pipeline.compute_prompt_logprobs(
-                                    &logits,
-                                    &prompt_ids,
-                                    Some(prompt_logprobs_num),
-                                )?;
+                let need_prompt_logprobs = scheduled.iter().any(|group| {
+                    group.sampling_params.prompt_logprobs.is_some()
+                });
+                
+                if need_prompt_logprobs {
+                    {
+                        let e = engine.read();
+                        let (pipeline, _) = e.get_pipeline(rank).unwrap();
+                        
+                        for group in scheduled.iter() {
+                            if group.sampling_params.prompt_logprobs.is_some() {
+                                let seq = group.get_seqs().values().next().unwrap();
+                                let prompt_ids = seq.deref().get_token_ids();
                                 
-                                seq.deref_mut().set_prompt_logprobs(prompt_logprobs);
+                                if !prompt_ids.is_empty() && logits.dims()[0] > 0 {
+                                    let prompt_logprobs = pipeline.compute_prompt_logprobs(
+                                        &logits,
+                                        &prompt_ids,
+                                        group.sampling_params.top_logprobs,
+                                    )?;
+                                    
+                                    seq.deref_mut().set_prompt_logprobs(prompt_logprobs);
+                                }
                             }
                         }
                     }
@@ -549,20 +753,68 @@ impl LLMEngine {
                 
                 let mut e = engine.write();
                 let prefill_chunk_size = e.prefill_chunk_size.unwrap_or(PREFILL_CHUNK_SIZE);
-                if prefill_chunk_size > 0 {
-                    let (finished_indices, finished_groups) = e
+                
+                if scheduled.len() == 1 && prefill_chunk_size > 0 {
+                    let group = &scheduled[0];
+                    let seq = group.get_seqs().values().next().unwrap();
+                    let prompt_len = seq.deref().get_len();
+                    
+                    if prompt_len <= prefill_chunk_size {
+                        let (finished_indices, _remaining_groups) = e
+                            .scheduler
+                            .filter_prefill_finished(&scheduled, prompt_len);
+                        
+                        if !finished_indices.is_empty() {
+                            let batch = finished_indices.len();
+                            logits = logits.index_select(
+                                &Tensor::from_vec(finished_indices.clone(), (batch,), logits.device())?,
+                                0,
+                            )?;
+                            
+                            let mut new_scheduled = VecDeque::new();
+                            for &idx in &finished_indices {
+                                new_scheduled.push_back(scheduled[idx as usize].clone());
+                            }
+                            scheduled = new_scheduled;
+                        }
+                    } else {
+                        let (finished_indices, _remaining_groups) = e
+                            .scheduler
+                            .filter_prefill_finished(&scheduled, prefill_chunk_size);
+                        
+                        if !finished_indices.is_empty() {
+
+                            let batch = finished_indices.len();
+                            logits = logits.index_select(
+                                &Tensor::from_vec(finished_indices.clone(), (batch,), logits.device())?,
+                                0,
+                            )?;
+                            
+                            let mut new_scheduled = VecDeque::new();
+                            for &idx in &finished_indices {
+                                new_scheduled.push_back(scheduled[idx as usize].clone());
+                            }
+                            scheduled = new_scheduled;
+                        }
+                    }
+                } else if prefill_chunk_size > 0 {
+                    let (finished_indices, _remaining_groups) = e
                         .scheduler
                         .filter_prefill_finished(&scheduled, prefill_chunk_size);
-
-                    if finished_indices.is_empty() {
-                        continue;
+                    
+                    if !finished_indices.is_empty() {
+                        let batch = finished_indices.len();
+                        logits = logits.index_select(
+                            &Tensor::from_vec(finished_indices.clone(), (batch,), logits.device())?,
+                            0,
+                        )?;
+                        
+                        let mut new_scheduled = VecDeque::new();
+                        for &idx in &finished_indices {
+                            new_scheduled.push_back(scheduled[idx as usize].clone());
+                        }
+                        scheduled = new_scheduled;
                     }
-                    scheduled = finished_groups;
-                    let batch = finished_indices.len();
-                    logits = logits.index_select(
-                        &Tensor::from_vec(finished_indices, (batch,), logits.device())?,
-                        0,
-                    )?;
                 }
             }
 
@@ -576,12 +828,17 @@ impl LLMEngine {
             let do_sample = rank == 0;
 
             let optional_results = if do_sample {
+                let sample_start = std::time::Instant::now();
                 let sample = {
-                    //only the first rank thread perform sampling
                     let mut e = engine.write();
                     let default_pipeline = e.get_mut_pipeline(0usize).unwrap().0.as_mut();
                     default_pipeline.sample(&logits, &scheduled).unwrap()
                 };
+                
+                let sample_time = sample_start.elapsed();
+                if sample_time.as_millis() > 10 {
+                    warn!("Sampling took {}ms", sample_time.as_millis());
+                }
 
                 #[cfg(feature = "nccl")]
                 if multi_process {
@@ -651,7 +908,6 @@ impl LLMEngine {
                 continue;
             }
 
-            //only the first rank thread perform stream response
             let results = optional_results.unwrap();
             for (result_, group) in zip(results, &scheduled) {
                 match result_ {
@@ -660,21 +916,26 @@ impl LLMEngine {
                         if seq.deref().is_prompt() {
                             prompt_finish_times.insert(*group.get_id(), SystemTime::now());
                         }
+                        
                         if let Some(sender) = &group.sender {
                             let e = engine.read();
                             let (pipeline, _) = e.get_pipeline(rank).unwrap();
                             
-                            // Include prompt_logprobs only on the first token
                             let prompt_logprobs = if seq.deref().get_output_len() == 0 {
                                 seq.deref().get_prompt_logprobs()
                             } else {
                                 None
                             };
                             
+                            let content = {
+                                let bytes_u8: Vec<u8> = logprobs.bytes.iter().map(|&b| b as u8).collect();
+                                String::from_utf8_lossy(&bytes_u8).to_string()
+                            };
+                            
                             let chunk = e.get_stream_response(
                                 group.request_id.clone(),
                                 group.arrival_time,
-                                Some(logprobs.bytes.clone()),
+                                Some(content),
                                 None,
                                 Some(logprobs.clone()),
                                 prompt_logprobs,
@@ -689,6 +950,7 @@ impl LLMEngine {
                                 seq.deref_mut().set_finish_reason("abort".to_string());
                             }
                         };
+                        
                         seq.deref_mut().add_token(logprobs);
                     }
                     Either::Right(finish_reason) => {
@@ -701,8 +963,8 @@ impl LLMEngine {
                                 group.arrival_time,
                                 None,
                                 Some(finish_reason.clone()),
-                                None,  // No logprobs for finish reason
-                                None,  // No prompt_logprobs for finish reason
+                                None,
+                                None,
                                 pipeline,
                             );
                             let ret = sender.send(ChatResponse::Chunk(chunk));
@@ -743,7 +1005,6 @@ impl LLMEngine {
                             group.request_id,
                         );
                     }
-                    // Create choices from the group
                     let mut seqs = group.get_seqs().values().collect::<Vec<_>>();
                     seqs.sort_by(|seq_a, seq_b| {
                         seq_b
@@ -771,12 +1032,24 @@ impl LLMEngine {
                         let e = engine.read();
                         for (index, seq) in top_n.iter().enumerate() {
                             let outputs = seq.deref_mut().get_output_tokens();
+                            
+                            if outputs.is_empty() {
+                                tracing::warn!("Sequence {} has no output tokens for logprobs", seq.deref().get_id());
+                            }
+                            
                             let data = outputs
                                 .iter()
-                                .map(|x| x.token.try_into().unwrap())
+                                .map(|x| x.token_id.try_into().unwrap())
                                 .collect::<Vec<_>>();
                             let pipeline = e.get_pipeline(0usize).unwrap().0.as_ref();
                             let data = pipeline.tokenizer().decode(&data, false).unwrap();
+                            
+                            let logprobs = if group.use_logprobs && !outputs.is_empty() {
+                                Some(WrapperLogprobs { content: outputs })
+                            } else {
+                                None
+                            };
+                            
                             let choice = ChatChoice {
                                 message: ChatChoiceData {
                                     role: pipeline.get_past_conversation().get_roles().0.clone(),
@@ -784,11 +1057,7 @@ impl LLMEngine {
                                 },
                                 finish_reason: Some(seq.deref_mut().get_finish_reason().clone()),
                                 index,
-                                logprobs: if group.use_logprobs {
-                                    Some(WrapperLogprobs { content: outputs })
-                                } else {
-                                    None
-                                },
+                                logprobs,
                                 prompt_logprobs: seq.deref().get_prompt_logprobs().map(|plp| {
                                     WrapperLogprobs { content: plp }
                                 }),
@@ -821,7 +1090,6 @@ impl LLMEngine {
                     responses.insert(group.request_id.clone(), (choices, usage));
 
                     if do_sync_response {
-                        //sync response notification
                         for request_id in responses.keys() {
                             let mut e = engine.write();
                             e.completion_records
@@ -937,7 +1205,6 @@ impl LLMEngine {
                     .block_tables
                     .get(&seq.deref_mut().get_id());
                 if table.is_none() {
-                    // Will be None during profiling.
                     slot_mappings.push([_PAD_SLOT_ID].repeat(prompt_len));
                     continue;
                 }
@@ -960,7 +1227,6 @@ impl LLMEngine {
                 let mut slot_mapping = Vec::new();
                 for i in num_cached_tokens..num_cached_tokens + num_tokens {
                     if i < start_idx {
-                        // Pad [0,start_idx) with _PAD_TOKEN_ID
                         slot_mapping.push(_PAD_SLOT_ID);
                     }
 

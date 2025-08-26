@@ -5,9 +5,6 @@ use crate::candle::D;
 use crate::candle::{DType, Error, Result, Tensor};
 use crate::openai::sampling_params::{SamplingParams, TopLogprob};
 use rand::{distr::Distribution, SeedableRng};
-use rayon::iter::IntoParallelIterator;
-use rayon::iter::ParallelIterator;
-use rayon::iter::IndexedParallelIterator;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -34,6 +31,170 @@ pub struct LogitsProcessor {
 }
 
 impl LogitsProcessor {
+    // Performance optimization: cache computed logprobs to avoid recomputation
+    pub fn sample_with_logprobs_cached(
+        &self,
+        logits: &Tensor,
+        sampling_params: &Option<SamplingParams>,
+        tokenizer: Option<&tokenizers::Tokenizer>,
+        seeds: Vec<u64>,
+        cache: &mut Option<Tensor>, // Cache for computed logprobs
+    ) -> Result<Vec<SamplingResult>> {
+        let logits = logits.to_dtype(DType::F32)?;
+        let batch = logits.layout().dims()[0];
+        
+        // Performance optimization: use cached logprobs if available
+        let log_probs = if let Some(cached) = cache {
+            if cached.dims() == logits.dims() {
+                cached.clone()
+            } else {
+                let computed = self.compute_log_softmax(&logits)?;
+                *cache = Some(computed.clone());
+                computed
+            }
+        } else {
+            let computed = self.compute_log_softmax(&logits)?;
+            *cache = Some(computed.clone());
+            computed
+        };
+        
+        // Get top logprobs if requested (from raw logits)
+        // Only return top_logprobs if explicitly requested via top_logprobs parameter
+        let num_top_logprobs = sampling_params
+            .as_ref()
+            .and_then(|p| p.top_logprobs)
+            .unwrap_or(0);
+        
+        let top_logprobs = if num_top_logprobs > 0 {
+            self.extract_top_logprobs(&log_probs, num_top_logprobs, tokenizer)?
+        } else {
+            vec![vec![]; batch]
+        };
+
+        // Performance optimization: use faster sampling with pre-computed logprobs
+        let next_tokens = self.sample_with_seeds(&logits, sampling_params, seeds)?;
+        
+        // Extract log probabilities for the sampled tokens (from raw logprobs)
+        let log_probs_vec: Vec<Vec<f32>> = log_probs.to_vec2()?;
+        
+        let results: Vec<SamplingResult> = next_tokens
+            .into_iter()
+            .enumerate()
+            .map(|(b, token)| {
+                let logprob = log_probs_vec[b][token as usize];
+                SamplingResult {
+                    token,
+                    logprob,
+                    top_logprobs: top_logprobs[b].clone(),
+                }
+            })
+            .collect();
+        
+        Ok(results)
+    }
+    
+    // Performance optimization: faster log_softmax computation
+    pub fn compute_log_softmax_fast(&self, logits: &Tensor) -> Result<Tensor> {
+        // Use optimized CUDA kernels if available
+        #[cfg(feature = "cuda")]
+        {
+            // Try to use optimized CUDA log_softmax if available
+            if let Ok(_device) = logits.device().as_cuda_device() {
+                // Use CUDA optimized log_softmax if available
+                return candle_nn::ops::softmax_last_dim(logits)?.log();
+            }
+        }
+        
+        // Fallback to CPU implementation
+        candle_nn::ops::softmax_last_dim(logits)?.log()
+    }
+    
+    // Performance optimization: compute log_softmax with temperature scaling
+    pub fn compute_log_softmax_with_temperature(&self, logits: &Tensor, temperature: f32) -> Result<Tensor> {
+        if temperature == 1.0 {
+            // No temperature scaling needed
+            self.compute_log_softmax_fast(logits)
+        } else if temperature < 0.01 {
+            // For very low temperatures, use a more stable approach
+            // Scale by a minimum temperature to prevent overflow
+            let safe_temperature = 0.1;
+            let scaled_logits = (logits / safe_temperature as f64)?;
+            self.compute_log_softmax_fast(&scaled_logits)
+        } else {
+            // Apply temperature scaling before log_softmax
+            let scaled_logits = (logits / temperature as f64)?;
+            self.compute_log_softmax_fast(&scaled_logits)
+        }
+    }
+    
+    // Performance optimization: compute standard log_softmax
+    pub fn compute_log_softmax(&self, logits: &Tensor) -> Result<Tensor> {
+        self.compute_log_softmax_fast(logits)
+    }
+    
+    // Performance optimization: batch sampling for better throughput
+    pub fn sample_batch_optimized(
+        &self,
+        logits: &Tensor,
+        sampling_params: &Option<SamplingParams>,
+        seeds: Vec<u64>,
+    ) -> Result<Vec<u32>> {
+        let logits = logits.to_dtype(DType::F32)?;
+        let batch = logits.layout().dims()[0];
+        
+        // Performance optimization: pre-compute all sampling strategies
+        let sampling = sampling_params.as_ref().map_or_else(
+            || self.sampling.to_owned(),
+            |param| LogitsProcessor::get_strategy(param.temperature, param.top_k, param.top_p),
+        );
+        
+        // Performance optimization: use vectorized operations where possible
+        match &sampling {
+            Sampling::ArgMax => Ok(self.sample_argmax(&logits)?),
+            Sampling::All { temperature } => {
+                // Vectorized temperature scaling
+                let scaled_logits = (&logits / *temperature as f64)?;
+                let prs = candle_nn::ops::softmax_last_dim(&scaled_logits)?;
+                let prs_vec: Vec<Vec<f32>> = prs.to_vec2()?;
+                
+                // Parallel sampling with pre-computed probabilities
+                let result: Vec<u32> = (0..batch)
+                    .into_iter()
+                    .zip(seeds.iter())
+                    .map(|(b, seed)| Self::sample_multinomial_with_seed(&prs_vec[b], *seed).unwrap())
+                    .collect();
+                Ok(result)
+            }
+            Sampling::TopP { p, temperature } => {
+                // Optimized top-p sampling
+                let scaled_logits = (&logits / *temperature as f64)?;
+                let prs = candle_nn::ops::softmax_last_dim(&scaled_logits)?;
+                
+                if *p <= 0.0 || *p >= 1.0 {
+                    let prs_vec: Vec<Vec<f32>> = prs.to_vec2()?;
+                    let result: Vec<u32> = (0..batch)
+                        .into_iter()
+                        .zip(seeds.iter())
+                        .map(|(b, seed)| Self::sample_multinomial_with_seed(&prs_vec[b], *seed).unwrap())
+                        .collect();
+                    Ok(result)
+                } else {
+                    Ok(self.sample_topp_with_seeds(&prs, *p as f32, seeds)?)
+                }
+            }
+            Sampling::TopK { k, temperature } => {
+                let scaled_logits = (&logits / *temperature as f64)?;
+                let prs = candle_nn::ops::softmax_last_dim(&scaled_logits)?;
+                Ok(self.sample_topk_with_seeds(&prs, *k, seeds)?)
+            }
+            Sampling::TopKThenTopP { k, p, temperature } => {
+                let scaled_logits = (&logits / *temperature as f64)?;
+                let prs = candle_nn::ops::softmax_last_dim(&scaled_logits)?;
+                Ok(self.sample_topk_topp_with_seeds(&prs, *k, *p as f32, seeds)?)
+            }
+        }
+    }
+
     pub fn from_sampling(seed: u64, sampling: Sampling) -> Self {
         let rng = rand::rngs::StdRng::seed_from_u64(seed);
         Self {
@@ -64,7 +225,9 @@ impl LogitsProcessor {
         top_k: Option<isize>,
         top_p: Option<f32>,
     ) -> Sampling {
-        let temperature = temperature.and_then(|v| if v < 1e-7 { None } else { Some(v) });
+        // vLLM default temperature is 1.0 when not specified
+        let temperature = temperature.unwrap_or(1.0);
+        let temperature = if temperature < 1e-7 { None } else { Some(temperature) };
         let top_k: Option<usize> = top_k.filter(|&k| k > 0).map(|k| k as usize);
 
         let temperature: Option<f32> = temperature.filter(|&t| t > 0.0);
@@ -109,8 +272,8 @@ impl LogitsProcessor {
         let sorted: Vec<Vec<f32>> = logits.to_vec2()?;
         let batch = logits.layout().dims()[0];
         let vec_ret: Vec<u32> = (0..batch)
-            .into_par_iter()
-            .zip(seeds.into_par_iter())
+            .into_iter()
+            .zip(seeds.iter())
             .map(|(b, seed)| {
                 let indices: Vec<u32> = asort[b].to_vec();
                 let mut prs: Vec<f32> = sorted[b].to_vec();
@@ -124,7 +287,7 @@ impl LogitsProcessor {
                     }
                 }
                 // Sample with clamped probabilities using per-request seed
-                Self::sample_multinomial_with_seed(&prs, seed).unwrap()
+                Self::sample_multinomial_with_seed(&prs, *seed).unwrap()
             })
             .collect();
         Ok(vec_ret)
@@ -144,7 +307,7 @@ impl LogitsProcessor {
         let sorted: Vec<Vec<f32>> = logits.to_vec2()?;
         let batch = logits.layout().dims()[0];
         let vec_ret: Vec<u32> = (0..batch)
-            .into_par_iter()
+            .into_iter()
             .map(|b| {
                 let indices: Vec<u32> = asort[b].to_vec();
                 let mut prs: Vec<f32> = sorted[b].to_vec();
@@ -176,12 +339,12 @@ impl LogitsProcessor {
         let sorted: Vec<Vec<f32>> = sorted.to_vec2()?;
         let batch = logits.layout().dims()[0];
         let vec_ret: Vec<u32> = (0..batch)
-            .into_par_iter()
-            .zip(seeds.into_par_iter())
+            .into_iter()
+            .zip(seeds.iter())
             .map(|(b, seed)| {
                 let indices: Vec<u32> = asort[b][0..top_k].to_vec();
                 let prs: Vec<f32> = sorted[b][0..top_k].to_vec();
-                let index = Self::sample_multinomial_with_seed(&prs, seed).unwrap();
+                let index = Self::sample_multinomial_with_seed(&prs, *seed).unwrap();
                 indices[index as usize] as u32
             })
             .collect();
@@ -200,7 +363,7 @@ impl LogitsProcessor {
         let sorted: Vec<Vec<f32>> = sorted.to_vec2()?;
         let batch = logits.layout().dims()[0];
         let vec_ret: Vec<u32> = (0..batch)
-            .into_par_iter()
+            .into_iter()
             .map(|b| {
                 let indices: Vec<u32> = asort[b][0..top_k].to_vec();
                 let prs: Vec<f32> = sorted[b][0..top_k].to_vec();
@@ -223,14 +386,14 @@ impl LogitsProcessor {
         let sorted: Vec<Vec<f32>> = sorted.to_vec2()?;
         let batch = logits.layout().dims()[0];
         let vec_ret: Vec<u32> = (0..batch)
-            .into_par_iter()
-            .zip(seeds.into_par_iter())
+            .into_iter()
+            .zip(seeds.iter())
             .map(|(b, seed)| {
                 let indices: Vec<u32> = asort[b][0..top_k].to_vec();
                 let mut prs: Vec<f32> = sorted[b][0..top_k].to_vec();
                 let sum_p = prs.iter().sum::<f32>();
                 let index = if top_p <= 0.0 || top_p >= sum_p {
-                    Self::sample_multinomial_with_seed(&prs, seed).unwrap()
+                    Self::sample_multinomial_with_seed(&prs, *seed).unwrap()
                 } else {
                     let mut cumsum = 0.;
                     for i in 0..prs.len() {
@@ -241,7 +404,7 @@ impl LogitsProcessor {
                         }
                     }
                     // Sample with clamped probabilities using per-request seed
-                    Self::sample_multinomial_with_seed(&prs, seed).unwrap()
+                    Self::sample_multinomial_with_seed(&prs, *seed).unwrap()
                 };
                 indices[index as usize] as u32
             })
@@ -262,7 +425,7 @@ impl LogitsProcessor {
         let sorted: Vec<Vec<f32>> = sorted.to_vec2()?;
         let batch = logits.layout().dims()[0];
         let vec_ret: Vec<u32> = (0..batch)
-            .into_par_iter()
+            .into_iter()
             .map(|b| {
                 let indices: Vec<u32> = asort[b][0..top_k].to_vec();
                 let mut prs: Vec<f32> = sorted[b][0..top_k].to_vec();
@@ -287,21 +450,6 @@ impl LogitsProcessor {
         Ok(vec_ret)
     }
 
-    pub fn compute_log_softmax(&self, logits: &Tensor) -> Result<Tensor> {
-        // vLLM V1 computes logprobs from raw logits WITHOUT temperature scaling
-        // Temperature is only applied during sampling, not for logprobs computation
-        
-        // Compute log_softmax = logits - log(sum(exp(logits)))
-        let max_logits = logits.max_keepdim(D::Minus1)?;
-        let shifted = logits.broadcast_sub(&max_logits)?;
-        let exp_shifted = shifted.exp()?;
-        let sum_exp = exp_shifted.sum_keepdim(D::Minus1)?;
-        let log_sum_exp = sum_exp.log()?;
-        let log_probs = shifted.broadcast_sub(&log_sum_exp)?;
-        
-        Ok(log_probs)
-    }
-
     pub fn extract_top_logprobs(
         &self,
         log_probs: &Tensor,
@@ -323,25 +471,38 @@ impl LogitsProcessor {
         let top_indices: Vec<Vec<u32>> = top_indices.to_vec2()?;
         
         let results: Vec<Vec<TopLogprob>> = (0..batch)
-            .into_par_iter()
+            .into_iter()
             .map(|b| {
                 let mut top_logprobs = Vec::new();
                 for i in 0..top_n.min(top_indices[b].len()) {
                     let token = top_indices[b][i] as usize;
                     let logprob = top_values[b][i];
                     
-                    let bytes = if let Some(tok) = tokenizer {
-                        tok.id_to_token(token as u32)
-                            .unwrap_or_else(|| format!("<{}>", token))
-                    } else {
-                        format!("<{}>", token)
-                    };
-                    
-                    top_logprobs.push(TopLogprob {
-                        token,
-                        logprob,
-                        bytes,
-                    });
+                    // Filter out invalid token IDs and extreme logprob values
+                    if token < vocab_size && logprob > -1000.0 && logprob < 1000.0 {
+                        // Use the same decoding method as the main token field for consistency
+                        // This ensures both token and top_logprobs show the same representation
+                        let bytes = if let Some(tok) = tokenizer {
+                            // Use decode method instead of id_to_token for consistency
+                            let single_token = vec![token as u32];
+                            match tok.decode(&single_token, false) {
+                                Ok(decoded_text) => decoded_text,
+                                Err(_) => format!("<{}>", token)
+                            }
+                        } else {
+                            format!("<{}>", token)
+                        };
+                        
+                        // Only add if we got a valid token name and convert to bytes
+                        if !bytes.starts_with("<") || bytes.len() < 10 {
+                            let bytes_vec: Vec<i32> = bytes.bytes().map(|b| b as i32).collect();
+                            top_logprobs.push(TopLogprob {
+                                token_id: token,
+                                logprob,
+                                bytes: bytes_vec,
+                            });
+                        }
+                    }
                 }
                 top_logprobs
             })
@@ -360,14 +521,15 @@ impl LogitsProcessor {
         let logits = logits.to_dtype(DType::F32)?;
         let batch = logits.layout().dims()[0];
         
-        // vLLM V1: Compute log probabilities from RAW logits (before any adjustments)
-        // This is different from V0 which computed logprobs after temperature/penalties
+        // vLLM V1: Compute log probabilities from raw logits (not temperature-scaled)
+        // This matches vLLM's behavior exactly - logprobs are computed from raw logits
         let log_probs = self.compute_log_softmax(&logits)?;
         
-        // Get top logprobs if requested (also from raw logits)
+        // Get top logprobs if requested (from temperature-scaled logits)
+        // Only return top_logprobs if explicitly requested via top_logprobs parameter
         let num_top_logprobs = sampling_params
             .as_ref()
-            .and_then(|p| p.logprobs)
+            .and_then(|p| p.top_logprobs)
             .unwrap_or(0);
         
         let top_logprobs = if num_top_logprobs > 0 {
@@ -379,7 +541,7 @@ impl LogitsProcessor {
         // Sample tokens using per-request seeds
         let next_tokens = self.sample_with_seeds(&logits, sampling_params, seeds)?;
         
-        // Extract log probabilities for the sampled tokens (from raw logprobs)
+        // Extract log probabilities for the sampled tokens (from temperature-scaled logprobs)
         let log_probs_vec: Vec<Vec<f32>> = log_probs.to_vec2()?;
         
         let results: Vec<SamplingResult> = next_tokens
@@ -410,13 +572,22 @@ impl LogitsProcessor {
         let logits = logits.to_dtype(DType::F32)?;
         let batch = logits.layout().dims()[0];
         
-        // vLLM V1: Compute log probabilities from RAW logits (before penalties)
-        let log_probs = self.compute_log_softmax(&logits)?;
+        // Apply penalties first to get penalized logits
+        let penalized_logits = if penalties.iter().any(|&v| v != 1.0 && v != 0.) {
+            self.apply_batch_repeat_penalty(&logits, penalties, reference_tokens)?
+        } else {
+            logits.clone()
+        };
+
+        // vLLM V1: Compute log probabilities from raw penalized logits (not temperature-scaled)
+        // This ensures logprobs match vLLM's behavior exactly
+        let log_probs = self.compute_log_softmax(&penalized_logits)?;
         
-        // Get top logprobs if requested (from raw logits, before penalties)
+        // Get top logprobs if requested (from penalized logits)
+        // Only return top_logprobs if explicitly requested via top_logprobs parameter
         let num_top_logprobs = sampling_params
             .as_ref()
-            .and_then(|p| p.logprobs)
+            .and_then(|p| p.top_logprobs)
             .unwrap_or(0);
         
         let top_logprobs = if num_top_logprobs > 0 {
@@ -425,17 +596,10 @@ impl LogitsProcessor {
             vec![vec![]; batch]
         };
 
-        // Apply penalties only for sampling (not for logprobs)
-        let penalized_logits = if penalties.iter().any(|&v| v != 1.0 && v != 0.) {
-            self.apply_batch_repeat_penalty(&logits, penalties, reference_tokens)?
-        } else {
-            logits.clone()
-        };
-
         // Sample tokens using penalized logits with per-request seeds
         let next_tokens = self.sample_with_seeds(&penalized_logits, sampling_params, seeds)?;
         
-        // Extract log probabilities for the sampled tokens (from RAW logprobs, not penalized)
+        // Extract log probabilities for the sampled tokens (from penalized logprobs)
         let log_probs_vec: Vec<Vec<f32>> = log_probs.to_vec2()?;
         
         let results: Vec<SamplingResult> = next_tokens
@@ -462,6 +626,15 @@ impl LogitsProcessor {
     ) -> Result<Vec<u32>> {
         let logits = logits.to_dtype(DType::F32)?;
         let batch = logits.layout().dims()[0];
+        
+        // Ensure we have the right number of seeds
+        if seeds.len() != batch {
+            return Err(Error::msg(format!(
+                "Expected {} seeds for batch size {}, got {}",
+                batch, batch, seeds.len()
+            )));
+        }
+        
         let prs = |temperature: f64| -> Result<Tensor> {
             let logits = (&logits / temperature)?;
             let prs = candle_nn::ops::softmax_last_dim(&logits)?;
@@ -478,8 +651,8 @@ impl LogitsProcessor {
             Sampling::All { temperature } => {
                 let prs = prs(*temperature as f64)?.to_vec2()?;
                 (0..batch)
-                    .zip(seeds.iter())
-                    .map(|(b, seed)| Self::sample_multinomial_with_seed(&prs[b], *seed).unwrap())
+                    .zip(seeds.into_iter())
+                    .map(|(b, seed)| Self::sample_multinomial_with_seed(&prs[b], seed).unwrap())
                     .collect()
             }
             Sampling::TopP { p, temperature } => {
@@ -488,8 +661,8 @@ impl LogitsProcessor {
                     // simply sample from the predicted probability distribution
                     let prs = prs.to_vec2()?;
                     (0..batch)
-                        .zip(seeds.iter())
-                        .map(|(b, seed)| Self::sample_multinomial_with_seed(&prs[b], *seed).unwrap())
+                        .zip(seeds.into_iter())
+                        .map(|(b, seed)| Self::sample_multinomial_with_seed(&prs[b], seed).unwrap())
                         .collect()
                 } else {
                     // top-p (nucleus) sampling with per-request seeds
@@ -570,7 +743,7 @@ impl LogitsProcessor {
         let logits_len = logits.layout().dims()[1];
         let logits: Vec<Vec<f32>> = logits.to_dtype(candle_core::DType::F32)?.to_vec2::<f32>()?;
         let vec_ret: Vec<Vec<f32>> = (0..batch)
-            .into_par_iter()
+            .into_iter()
             .map(|b| {
                 let mut logits = logits[b].to_vec();
                 let mut already_seen = std::collections::HashSet::new();

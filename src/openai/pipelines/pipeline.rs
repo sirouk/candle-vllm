@@ -1124,11 +1124,15 @@ impl DefaultPipeline {
                 {
                     Right("stop".to_string())
                 } else {
+                    let token_text = self.tokenizer
+                        .id_to_token(next_token as u32)
+                        .unwrap_or_else(|| format!("<{}>", next_token));
+                    
                     Left(Logprobs {
                         token_id: next_token as usize,
                         logprob: sampling_result.logprob,
                         top_logprobs: sampling_result.top_logprobs,
-                        bytes: text.bytes().map(|b| b as i32).collect(),
+                        bytes: token_text.bytes().map(|b| b as i32).collect(),
                     })
                 }
             })
@@ -1171,10 +1175,9 @@ impl DefaultPipeline {
             };
             
             // Get the text for this token
-            // Use decode method for consistency with other token representations
             let bytes = self.tokenizer
-                .decode(&[next_token_id as u32], false)
-                .unwrap_or_else(|_| format!("<{}>", next_token_id));
+                .id_to_token(next_token_id as u32)
+                .unwrap_or_else(|| format!("<{}>", next_token_id));
             
             prompt_logprobs.push(Logprobs {
                 token_id: next_token_id,

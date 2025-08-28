@@ -928,8 +928,16 @@ impl LLMEngine {
                             };
                             
                             let content = {
-                                let bytes_u8: Vec<u8> = logprobs.bytes.iter().map(|&b| b as u8).collect();
-                                String::from_utf8_lossy(&bytes_u8).to_string()
+                                // Convert the current token ID to readable text using decode
+                                // This converts special characters like "Ġ" to readable spaces
+                                let token_ids = vec![logprobs.token_id as u32];
+                                if let Ok(decoded_text) = pipeline.tokenizer().decode(&token_ids, false) {
+                                    decoded_text
+                                } else {
+                                    // Fallback to bytes if decode fails
+                                    let bytes_u8: Vec<u8> = logprobs.bytes.iter().map(|&b| b as u8).collect();
+                                    String::from_utf8_lossy(&bytes_u8).to_string()
+                                }
                             };
                             
                             let chunk = e.get_stream_response(
